@@ -1,0 +1,72 @@
+{
+    "name": "foxzone",
+    "version": "1.0.0",
+    "description": "墨狐空间：将 Bot 连接到 QQ 空间，实现说说自动发送、好友动态监控与评论互动",
+    "author": "MoFox Studio",
+    "dependencies": {
+        "plugins": [],
+        "components": []
+    },
+    "include": [
+        {
+            "component_type": "tool",
+            "component_name": "qzone_read_feed",
+            "dependencies": []
+        },
+        {
+            "component_type": "tool",
+            "component_name": "qzone_post_comment",
+            "dependencies": []
+        },
+        {
+            "component_type": "tool",
+            "component_name": "qzone_like_feed",
+            "dependencies": []
+        },
+        {
+            "component_type": "tool",
+            "component_name": "qzone_start_compose_feed",
+            "dependencies": []
+        },
+        {
+            "component_type": "tool",
+            "component_name": "qzone_submit_feed",
+            "dependencies": []
+        },
+        {
+            "component_type": "command",
+            "component_name": "foxzone",
+            "dependencies": []
+        },
+        {
+            "component_type": "service",
+            "component_name": "qzone_service",
+            "dependencies": []
+        },
+        {
+            "component_type": "adapter",
+            "component_name": "qzone_adapter",
+            "dependencies": []
+        },
+        {
+            "component_type": "chatter",
+            "component_name": "qzone_chatter",
+            "dependencies": []
+        },
+        {
+            "component_type": "config",
+            "component_name": "config",
+            "dependencies": []
+        }
+    ],
+    "python_dependencies": [
+        "aiohttp>=3.9",
+        "beautifulsoup4>=4.12",
+        "json5>=0.9",
+        "orjson>=3.9",
+        "Pillow>=10.0"
+    ],
+    "entry_point": "plugin.py",
+    "min_core_version": "1.0.0",
+    "dependencies_required": true
+}
