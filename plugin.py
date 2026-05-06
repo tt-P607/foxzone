@@ -61,16 +61,22 @@ class FoxZonePlugin(BasePlugin):
         """插件加载完成后的初始化回调。
 
         执行顺序：
-        1. 注册 PromptManager 提示词模板
-        2. 预热 QZoneService 的持久化状态
+        1. 读取 ``general.enabled``，为 False 则跳过后续初始化
+        2. 注册 PromptManager 提示词模板
+        3. 预热 QZoneService 的持久化状态
 
         Raises:
             任何注册或服务初始化阶段的异常都会向上传播，
             由插件管理器记录并标记加载失败，不在此处吞异常。
         """
+        cfg = cast(FoxZoneConfig, self.config)
+        if not cfg.general.enabled:
+            logger.warning("FoxZone 插件未启用（general.enabled=false），跳过初始化。")
+            return
+
         # 1. 注册提示词模板（所有模板文本来自 config.prompts，由配置框架
         #    根据 PromptsSection 的 Field(default=...) 自动落盘到 config.toml）
-        register_foxzone_prompts(cast(FoxZoneConfig, self.config))
+        register_foxzone_prompts(cfg)
         logger.info("FoxZone 提示词模板注册完成。")
 
         # 2. 预热服务持久化状态（ReplyTracker 等）
@@ -95,9 +101,13 @@ class FoxZonePlugin(BasePlugin):
         """返回插件内所有组件类。
 
         Returns:
-            组件类列表，框架会自动注册到全局注册表
+            组件类列表，框架会自动注册到全局注册表。
+            ``general.enabled=false`` 时返回空列表，所有组件不注册、
+            后台循环也不会启动。
         """
         cfg = cast(FoxZoneConfig, self.config)
+        if not cfg.general.enabled:
+            return []
         components: list[type] = [
             ReadFeedTool,
             QZoneCommentTool,
