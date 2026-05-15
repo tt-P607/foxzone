@@ -40,9 +40,9 @@
 ## 安装与启用
 
 1. 把本目录放入主程序的 `plugins/foxzone/`
-2. 安装 Python 依赖（已声明在 `manifest.json` 的 `python_dependencies`）：
+2. 依赖声明在 `manifest.json` 中，系统将自动尝试安装，或可手动运行安装：
    ```bash
-   uv add aiohttp beautifulsoup4 json5 orjson Pillow
+   uv pip install aiohttp beautifulsoup4 json5 orjson Pillow
    ```
 3. 在 `config/plugins/foxzone/config.toml` 中至少填写：
    ```toml
@@ -153,4 +153,4 @@ uv tool run ruff check plugins/foxzone
 
 ## 协议
 
-随主仓库 LICENSE 发布。
+随主仓库 LICENSE (AGPL-v3.0) 发布。

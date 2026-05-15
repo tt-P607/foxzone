@@ -1,8 +1,19 @@
 {
     "name": "foxzone",
+    "display_name": "墨狐空间",
     "version": "1.0.0",
     "description": "墨狐空间：将 Bot 连接到 QQ 空间，实现说说自动发送、好友动态监控与评论互动",
     "author": "MoFox Studio",
+    "license": "AGPL-v3.0",
+    "categories": [
+        "chat"
+    ],
+    "tags": [
+        "qzone",
+        "feed",
+        "comment",
+        "qq"
+    ],
     "dependencies": {
         "plugins": [],
         "components": []
