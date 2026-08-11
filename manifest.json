@@ -1,6 +1,6 @@
 {
     "name": "foxzone",
-    "api_version": {"adapter_api": "1.0.0", "llm_api": "1.0.0", "log_api": "1.0.0", "plugin_api": "1.0.0", "prompt_api": "1.0.0", "service_api": "1.0.0", "storage_api": "1.0.0", "stream_api": "1.0.0"},
+    "api_version": {"adapter_api": "1.0.0", "config_api": "1.0.0", "llm_api": "1.0.0", "log_api": "1.0.0", "prompt_api": "1.0.0", "service_api": "1.0.0", "storage_api": "1.0.0"},
 
     "display_name": "墨狐空间",
     "version": "1.0.0",

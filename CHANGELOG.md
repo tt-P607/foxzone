@@ -49,6 +49,7 @@
 - `autopilot/scheduler.py`：Bot QQ 号改为每次轮询时动态获取（`_once_with_bot_qq`），不再启动阶段预取，避免适配器未就绪时取到空串并长期失效
 - `runtime.py`：`bot_qq()` 仅在取回非空 QQ 号时缓存，失败不缓存空串，便于后续重试
 - `core/cookie.py`：新增 `has_adapter()` 供就绪判定；日志泛化，不再出现具体适配器名，统一「通过适配器获取 Cookie」，并明确打印成功 / 失败结果
+- `core/cookie.py`：Cookie 适配器探测改为遍历所有已启动且支持 API 透传的适配器，首个成功即返回，移除固定签名顺序（snowluma → onebot）
 - `runtime.py` / `config.py` / `config.toml` / `README.md`：同步泛化适配器描述文案
 
 ### Cookie 获取退避重试（解决适配器 WS 未就绪）

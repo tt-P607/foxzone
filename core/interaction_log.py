@@ -177,8 +177,6 @@ class InteractionLog:
         key = _make_key(target_qq, feed_id)
         entry = self._data.get(key)
         if entry is None:
-            # 该 (qq, feed) 不在 log 中（理论不会发生：调用方应仅对已记录条目调用），
-            # 静默忽略以避免污染数据。
             return
         entry["last_followup_check"] = time.time()
         self._dirty = True

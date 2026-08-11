@@ -12,8 +12,6 @@ from src.app.plugin_system.base import BaseTool
 
 from .. import SERVICE_SIG
 
-_SERVICE_SIG = SERVICE_SIG
-
 
 class ReadFeedTool(BaseTool):
     """读取 QQ 空间说说内容（含评论）的 Tool。
@@ -41,7 +39,7 @@ class ReadFeedTool(BaseTool):
         """
         from ..service import QZoneService
 
-        service: QZoneService | None = get_service(_SERVICE_SIG)  # type: ignore[assignment]
+        service: QZoneService | None = get_service(SERVICE_SIG)  # type: ignore[assignment]
         if service is None:
             return False, "FoxZone 服务未注册。"
 

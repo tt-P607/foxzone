@@ -1,11 +1,8 @@
 """Autopilot：FoxZone 自治调度器。
 
 管理三条定时循环（自己说说评论轮询 / 好友动态监控 / 外部空间接力回查），
-含勿扰时段（DND）判定。取代旧版继承 ``BaseAdapter`` 的 QZoneAdapter——
-它唯一的实职就是定时器宿主，不需要 transport 语义。
-
-通过 :class:`~plugins.foxzone.runtime.QZoneRuntime` 注入依赖，
-不经过 ``get_service()`` 反查。
+含勿扰时段（DND）判定。通过 :class:`~plugins.foxzone.runtime.QZoneRuntime`
+注入依赖，不经过 ``get_service()`` 反查。
 """
 
 from __future__ import annotations

@@ -17,8 +17,6 @@ from .. import SERVICE_SIG
 
 logger = get_logger("foxzone.tool.comment", color=COLOR.CYAN)
 
-_SERVICE_SIG = SERVICE_SIG
-
 #: ``QZoneCommentTool.description`` 中拼接给 LLM 的评论硬性约束。
 #:
 #: 这是 Tool 的硬编码"调用合同"（schema 描述），不属于用户可调提示词，
@@ -67,7 +65,7 @@ class QZoneCommentTool(BaseTool):
         """
         from ..service import QZoneService
 
-        service: QZoneService | None = get_service(_SERVICE_SIG)  # type: ignore[assignment]
+        service: QZoneService | None = get_service(SERVICE_SIG)  # type: ignore[assignment]
         if service is None:
             return False, "FoxZone 服务未注册"
 

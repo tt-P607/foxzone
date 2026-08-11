@@ -9,8 +9,7 @@
 所有长提示词统一从 PromptManager 读取。
 
 本类持有 :class:`~plugins.foxzone.runtime.QZoneRuntime` 引用获取
-配置、识图缓存与 API 客户端，不再通过 ``get_service()`` 反查
-（消除旧版 Service ↔ Content 循环依赖）。
+配置、识图缓存与 API 客户端，不通过 ``get_service()`` 反查。
 """
 
 from __future__ import annotations
@@ -33,7 +32,9 @@ from .personality import get_now_info, get_personality_desc
 from .vision import describe_images, download_images
 
 if typing.TYPE_CHECKING:
+    from ...config import FoxZoneConfig
     from ...runtime import QZoneRuntime
+    from src.kernel.llm import ModelSet
 
 logger = get_logger("foxzone.content_service", color=COLOR.ORANGE)
 
@@ -67,7 +68,7 @@ class ContentService:
         self._runtime = runtime
 
     @property
-    def _cfg(self):
+    def _cfg(self) -> "FoxZoneConfig":
         """当前插件配置（FoxZoneConfig）。"""
         return self._runtime.config
 
@@ -83,7 +84,7 @@ class ContentService:
             logger.error(f"读取提示词模板 '{name}' 失败: {exc}")
             return None
 
-    def _get_model_set(self, task_name: str):
+    def _get_model_set(self, task_name: str) -> ModelSet | None:
         """读取模型任务对应的 ModelSet。"""
         try:
             return get_model_set_by_task(task_name)

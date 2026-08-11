@@ -14,26 +14,13 @@ from src.app.plugin_system.api.log_api import COLOR, get_logger
 from ..core.interaction_log import ACTION_COMMENT, ACTION_LIKE, SOURCE_POLL
 from ..core.llm import log_llm_prompt
 from ..core.llm.vision import fill_image_text
+from ..core.text_utils import truncate_preview
 from .engine import BatchPolicy, BatchSendEngine
 
 if typing.TYPE_CHECKING:
     from ..runtime import QZoneRuntime
 
 logger = get_logger("foxzone.autopilot.friend_feeds", color=COLOR.CYAN)
-
-
-def _preview(text: str, limit: int = 40) -> str:
-    """截断正文用于日志预览，避免日志被超长正文刷屏。
-
-    Args:
-        text: 原始正文
-        limit: 最大字符数
-
-    Returns:
-        截断后的预览文本（超出部分以 … 结尾）
-    """
-    text = text.replace("\n", " ").strip()
-    return text if len(text) <= limit else text[:limit] + "…"
 
 
 async def friend_monitor_once(runtime: "QZoneRuntime", num_feeds: int) -> None:
@@ -204,7 +191,7 @@ async def process_feed_monitor_batch(
         comment_text = decision_map.get(tid)
         runtime.interaction_log.mark(target_qq, tid, ACTION_COMMENT, SOURCE_POLL)
         await runtime.interaction_log.save()
-        content_preview = _preview(str(item.get("content", "") or "（无正文）"))
+        content_preview = truncate_preview(str(item.get("content", "") or "（无正文）"))
         logger.info(
             f"[bold #F38BA8]评论成功：QQ [bold #CBA6F7]{target_qq}[/bold #CBA6F7]"
             f" 的说说「[bold #CBA6F7]{content_preview}[/bold #CBA6F7]」"

@@ -1,17 +1,11 @@
 """FoxZone 插件级运行时状态容器（QZoneRuntime）。
 
-框架的 ``ServiceManager.get_service()`` 每次都会创建新的 Service 实例
-（非单例）。旧版把持久化状态（reply_tracker / interaction_log /
-vision_cache）挂在 Service 上，导致：
-
-1. 每次 ``get_service()`` 后首次使用都重复读盘；
-2. ``InteractionLog`` 整字典覆盖写在并发实例间互相踩踏；
-3. 实例级锁失效，被迫使用模块级锁。
-
-本模块把所有有状态对象上移到插件层：``FoxZonePlugin`` 在
-``on_plugin_loaded`` 时创建唯一的 ``QZoneRuntime`` 并初始化，
-所有组件（Service / Tool / Autopilot / ContentService）通过
-``plugin.runtime`` 共享同一份状态。
+集中持有插件全部有状态对象：Cookie 服务、三份持久化状态
+（reply_tracker / interaction_log / vision_cache）、LLM 内容服务
+与发送串行锁。``FoxZonePlugin`` 在 ``on_plugin_loaded`` 时创建
+唯一的 ``QZoneRuntime`` 并初始化，所有组件（Service / Tool /
+Autopilot / ContentService）通过 ``plugin.runtime`` 共享同一份状态，
+保证状态一致性与锁语义在插件内全局生效。
 """
 
 from __future__ import annotations

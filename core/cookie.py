@@ -28,11 +28,6 @@ _COOKIE_DIR = Path("data/foxzone/cookies")
 
 #: 用于获取 Cookie 的适配器 action 名（各 QQ 适配器同命令名）。
 _GET_COOKIES_ACTION = "get_cookies"
-#: 自动探测时按此顺序尝试已启动的适配器签名。
-_DEFAULT_ADAPTER_SIGNATURES = (
-    "snowluma_adapter:adapter:snowluma_adapter",
-    "onebot_adapter:adapter:onebot_adapter",
-)
 
 
 def parse_cookie_string(cookie_str: str) -> dict[str, str]:
@@ -45,7 +40,7 @@ def parse_cookie_string(cookie_str: str) -> dict[str, str]:
         解析后的 ``{键: 值}`` 字典
     """
     result: dict[str, str] = {}
-    if not cookie_str or not isinstance(cookie_str, str):
+    if not cookie_str:
         return result
     for part in cookie_str.split("; "):
         if "=" in part:
@@ -139,15 +134,13 @@ class CookieService:
     def has_adapter(self) -> bool:
         """判断当前是否存在可用的 Cookie 适配器。
 
-        候选适配器已启动即视为可用（实际能否取回 Cookie 由 ``get_cookies`` 判定）。
+        候选适配器已启动且支持 API 透传即视为可用
+        （实际能否取回 Cookie 由 ``get_cookies`` 判定）。
 
         Returns:
             True 表示至少有一个候选适配器已启动
         """
-        for signature in self._resolve_adapter_signatures():
-            if get_all_adapters().get(signature) is not None:
-                return True
-        return False
+        return bool(self._candidate_adapters())
 
     def clear_cache(self, qq_account: str) -> None:
         """删除指定账号的本地 Cookie 缓存文件。
@@ -220,9 +213,9 @@ class CookieService:
     async def _get_from_adapter(self) -> dict[str, str] | None:
         """通过已启动适配器的 ``get_cookies`` action 获取 Cookie。
 
-        按配置的 ``adapter_signature`` 精确指定，或自动探测已启动的 QQ 适配器。
-        所有适配器统一透传 ``get_cookies``。适配器虽已启动但 WebSocket 长连接
-        可能尚未建立，故失败后按退避策略重试（默认 3/6/9 秒递增）。
+        遍历所有支持 API 透传的已启动适配器，首个成功即返回；也可通过
+        ``adapter_signature`` 精确指定单个适配器。适配器虽已启动但 WebSocket
+        长连接可能尚未建立，故失败后按退避策略重试（默认 3/6/9 秒递增）。
 
         Returns:
             Cookie 字典；全部重试均失败时返回 None
@@ -233,12 +226,12 @@ class CookieService:
 
         last_error: Exception | None = None
         for attempt in range(retry_times + 1):
-            signatures = self._resolve_adapter_signatures()
-            if not signatures:
+            adapters = self._candidate_adapters()
+            if not adapters:
                 logger.warning("未找到可用的适配器来获取 Cookie（无已启动的 QQ 适配器）。")
                 return None
 
-            cookies, last_error = await self._try_adapters(signatures, cfg)
+            cookies, last_error = await self._try_adapters(adapters, cfg)
             if cookies is not None:
                 return cookies
             if attempt >= retry_times:
@@ -257,27 +250,19 @@ class CookieService:
         return None
 
     async def _try_adapters(
-        self, signatures: list[str], cfg: typing.Any
+        self, adapters: list[typing.Any], cfg: typing.Any
     ) -> tuple[dict[str, str] | None, Exception | None]:
         """尝试一轮所有候选适配器，返回首个成功的 Cookie 字典。
 
         Args:
-            signatures: 本次尝试的适配器签名列表
+            adapters: 本次尝试的适配器实例列表
             cfg: Cookie 配置节
 
         Returns:
             (Cookie 字典, 本轮最后一次异常)；本轮全部失败时 Cookie 为 None
         """
         last_error: Exception | None = None
-        for signature in signatures:
-            adapter = get_all_adapters().get(signature)
-            if adapter is None:
-                continue
-
-            # 各 QQ 适配器统一透传 get_cookies，仅保留支持 API 透传的适配器
-            if not hasattr(adapter, "send_snowluma_api") and not hasattr(adapter, "send_onebot_api"):
-                continue
-
+        for adapter in adapters:
             try:
                 resp = await self._call_adapter(adapter, cfg)
             except Exception as exc:  # noqa: BLE001 - 逐适配器尝试，需兜底
@@ -294,20 +279,26 @@ class CookieService:
 
         return None, last_error
 
-    def _resolve_adapter_signatures(self) -> list[str]:
-        """解析本次尝试的适配器签名列表。
+    def _candidate_adapters(self) -> list[typing.Any]:
+        """返回本次可尝试的候选适配器实例列表。
 
-        配置显式指定 ``adapter_signature`` 时仅尝试该签名；
-        留空时按默认顺序探测已启动的适配器。
+        配置显式指定 ``adapter_signature`` 时仅返回该签名对应的适配器；
+        留空时返回所有已启动且支持 ``send_snowluma_api`` / ``send_onebot_api``
+        透传方法的适配器（各 QQ 适配器对 ``get_cookies`` 使用相同命令名）。
 
         Returns:
-            适配器签名列表
+            候选适配器实例列表
         """
         configured = self._config.cookie.adapter_signature.strip()
         if configured:
-            return [configured]
-        active = set(get_all_adapters().keys())
-        return [sig for sig in _DEFAULT_ADAPTER_SIGNATURES if sig in active]
+            adapter = get_all_adapters().get(configured)
+            return [adapter] if adapter is not None else []
+
+        candidates: list[typing.Any] = []
+        for adapter in get_all_adapters().values():
+            if hasattr(adapter, "send_snowluma_api") or hasattr(adapter, "send_onebot_api"):
+                candidates.append(adapter)
+        return candidates
 
     async def _call_adapter(self, adapter: typing.Any, cfg: typing.Any) -> dict | None:
         """调用单个适配器的 ``get_cookies`` action。

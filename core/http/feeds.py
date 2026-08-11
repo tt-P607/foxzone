@@ -128,13 +128,12 @@ class FeedsMixin(QZoneClientBase):
 
                 # 通过 msgdetail_v6 接口拉取完整评论列表，覆盖 msglist_v6 内嵌的评论。
                 # msglist_v6 返回的 commentlist 中，主评论 tid 在某些场景下是局部序号
-                # （"1"/"2"/...，而非 24 位 hex 全局 tid），导致后续 reply 命中 -10049。
-                # msgdetail_v6 始终返回 hex 全局 tid，是楼中楼回复的可靠数据源。
+                # （"1"/"2"/...，而非 24 位 hex 全局 tid），会导致后续 reply 触发 -10049；
+                # msgdetail_v6 始终返回 hex 全局 tid。
                 if paginate_comments:
                     fresh = await self._fetch_all_comments(
                         host_qq=str(target_qq),
                         tid=str(msg_tid),
-                        initial_count=0,
                     )
                     if fresh:
                         comments = fresh
@@ -171,25 +170,20 @@ class FeedsMixin(QZoneClientBase):
         self,
         host_qq: str,
         tid: str,
-        initial_count: int = 0,
     ) -> list[dict[str, Any]]:
         """通过 ``msgdetail_v6`` 接口获取说说的完整评论列表。
 
-        历史方案演进：
-        1. 旧 ``emotion_cgi_comment_list``：500 错误（接口已废弃）
-        2. ``emotion_cgi_ic_getcomments``：仅返回 HTML 渲染片段，无结构化 tid
-        3. **当前**：``emotion_cgi_msgdetail_v6`` 返回结构化 JSON，含 hex 全局 tid
-
-        ``msgdetail_v6`` 一次性返回完整评论列表（含 list_3 楼中楼），无需分页。
-        若接口因资源限制（-10004 等）失败，返回空列表，调用方降级使用 msglist_v6 数据。
+        ``msgdetail_v6`` 一次性返回完整评论列表（含 list_3 楼中楼），
+        且其中的评论 tid 为 hex 全局 tid，可作为 reply 接口的 commentId。
+        若接口失败（如 -10004 资源限制），返回空列表，由调用方降级使用
+        msglist_v6 内嵌评论数据。
 
         Args:
             host_qq: 说说主人 QQ 号
             tid: 说说 tid
-            initial_count: 已有评论数，从此偏移起截取（兼容旧调用语义）
 
         Returns:
-            从 initial_count 开始的评论列表（空列表表示接口不可用）
+            完整评论列表；接口不可用时返回空列表
         """
         try:
             detail = await self.fetch_feed_detail(str(host_qq), str(tid))
@@ -202,9 +196,7 @@ class FeedsMixin(QZoneClientBase):
         all_comments = detail.get("comments") or []
         if not isinstance(all_comments, list):
             return []
-        if initial_count <= 0:
-            return list(all_comments)
-        return all_comments[initial_count:] if initial_count < len(all_comments) else []
+        return list(all_comments)
 
     async def fetch_feed_detail(
         self, host_qq: str, tid: str

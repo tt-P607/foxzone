@@ -1,6 +1,6 @@
 """FoxZone 自治层（Autopilot）。
 
-FoxZone 自己的定时闭环，取代旧版 QZoneAdapter + QZoneChatter：
+FoxZone 自己的定时闭环：
 
 - :mod:`scheduler`：DND 判定 + 三条定时循环
 - :mod:`engine`：BatchSendEngine（抖动/重试/限流/标记，三条流程共用）

@@ -17,26 +17,13 @@ from src.app.plugin_system.api.log_api import COLOR, get_logger
 from ..core.comment_tree import resolve_root_comment_tid, is_local_seq_tid
 from ..core.interaction_log import ACTION_COMMENT, SOURCE_POLL
 from ..core.llm import log_llm_prompt
+from ..core.text_utils import truncate_preview
 from .engine import BatchPolicy, BatchSendEngine
 
 if typing.TYPE_CHECKING:
     from ..runtime import QZoneRuntime
 
 logger = get_logger("foxzone.autopilot.external", color=COLOR.CYAN)
-
-
-def _preview(text: str, limit: int = 40) -> str:
-    """截断正文用于日志预览，避免日志被超长正文刷屏。
-
-    Args:
-        text: 原始正文
-        limit: 最大字符数
-
-    Returns:
-        截断后的预览文本（超出部分以 … 结尾）
-    """
-    text = str(text or "").replace("\n", " ").strip()
-    return text if len(text) <= limit else text[:limit] + "…"
 
 
 async def external_followup_once(
@@ -353,7 +340,7 @@ async def process_reply_batch(
         host_qq = str(item.get("host_qq", ""))
         feed_id = str(item.get("feed_id", ""))
         reply_text = decision_map.get(str(item.get("comment_tid", "")))
-        feed_preview = _preview(str(item.get("feed_content", "") or "（无正文）"))
+        feed_preview = truncate_preview(str(item.get("feed_content", "") or "（无正文）"))
         commenter = item.get("commenter_name", "未知用户")
         logger.info(
             f"[bold #F38BA8]接力回复成功：QQ [bold #CBA6F7]{host_qq}"

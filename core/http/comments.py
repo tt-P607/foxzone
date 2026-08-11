@@ -18,6 +18,13 @@ import orjson
 from .client import COMMENT_URL, QZoneClientBase, logger
 
 
+class QZoneRateLimitError(RuntimeError):
+    """QZone 反爬限流错误（code=-10049）。
+
+    该错误重试亦无效，由批量发送引擎识别并终止重试。
+    """
+
+
 class CommentsMixin(QZoneClientBase):
     """评论与楼中楼回复能力。"""
 
@@ -211,8 +218,8 @@ class CommentsMixin(QZoneClientBase):
                         f"回复失败: {parsed_msg} (错误码: -3000)"
                     )
                 if parsed_code == -10049:
-                    # QZone 限流：retry 也徒劳，抛 RuntimeError 让上层判定为不可重试错误
-                    raise RuntimeError(
+                    # QZone 限流：重试亦无效，抛专用异常让批量引擎判定为不可重试错误
+                    raise QZoneRateLimitError(
                         f"QZone 限流（code=-10049, subcode={parsed_subcode}）：{parsed_msg}"
                     )
                 if parsed_code is not None:

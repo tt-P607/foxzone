@@ -3,9 +3,6 @@
 统一「批量决策后逐条发送」的通用骨架：随机抖动、失败重试、
 限流分类、成功/限流/收尾回调。三条自治流程（自己说说评论回复、
 好友动态评论、外部接力回复）共用本引擎，业务差异通过回调注入。
-
-锁的获取/释放使用 ``async with``，从结构上杜绝旧版
-``acquire()``/``release()`` 手动配对在异常路径上的锁泄漏。
 """
 
 from __future__ import annotations
@@ -16,6 +13,8 @@ from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable
 
 from src.app.plugin_system.api.log_api import COLOR, get_logger
+
+from ..core.http.comments import QZoneRateLimitError
 
 logger = get_logger("foxzone.batch_engine", color=COLOR.ORANGE)
 
@@ -91,8 +90,9 @@ class BatchSendEngine:
 
         1. ``should_send(item)`` 为 False → 计入 skipped，仅执行 ``on_finally``；
         2. 否则发送（非首条前随机抖动），失败按退避重试；
-        3. ``sender`` 抛 ``RuntimeError`` 视为不可重试（cookie 失效 / -10049 限流），
-           含 "-10049" 或 "限流" 关键字时归类为限流；
+        3. ``sender`` 抛 ``RuntimeError`` 视为不可重试（cookie 失效 / -10049 限流）；
+           抛 :class:`~plugins.foxzone.core.http.comments.QZoneRateLimitError`
+           时归类为限流；
         4. 成功 → ``on_success``；限流 → ``on_rate_limited``（若
            ``stop_batch_on_rate_limit`` 为 True 则终止整批）；
         5. 无论成败最后执行 ``on_finally``（如标记已处理）。
@@ -141,7 +141,7 @@ class BatchSendEngine:
                         # 不可重试错误（cookie 失效 / QZone 限流）
                         last_err = exc
                         ok = False
-                        rate_limited = "-10049" in str(exc) or "限流" in str(exc)
+                        rate_limited = isinstance(exc, QZoneRateLimitError)
                         logger.warning(
                             f"发送遇到不可重试错误，停止重试 {item_label}: {exc}"
                         )

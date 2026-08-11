@@ -95,7 +95,7 @@ class ReplyTrackerService:
     async def _persist(self) -> None:
         """将当前数据写入 storage_api 持久化存储。
 
-        若保存失败，仅记录错误日志，不抛出异常（回复跟踪为非关键功能）。
+        若保存失败，仅记录错误日志，不抛出异常。
         """
         try:
             await storage_api.save_json(_STORE_NAMESPACE, _STORE_KEY, self._data)

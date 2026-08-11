@@ -127,9 +127,8 @@ class QZoneClientBase:
             "Origin": "https://user.qzone.qq.com",
             "Connection": "keep-alive",
         }
-        # 注意：不设置 Host 头，让 aiohttp 自动从实际 URL 推导。
-        # 之前硬编码 Host=user.qzone.qq.com 会与 h5.qzone.qq.com / taotao.qq.com
-        # 等接口 URL 不匹配，触发 QZone 服务端反爬识别，返回 -10049 限流降级。
+        # 不设置 Host 头，由 aiohttp 从实际 URL 推导，避免与 h5/taotao 等
+        # 接口 URL 不匹配而触发 QZone 反爬识别。
         if headers:
             final_headers.update(headers)
 
@@ -164,7 +163,7 @@ class QZoneClientBase:
         Returns:
             base64 编码字符串
         """
-        return str(base64.b64encode(image_bytes))[2:-1]
+        return base64.b64encode(image_bytes).decode("ascii")
 
     @staticmethod
     def _get_picbo_and_richval(upload_result: dict[str, Any]) -> tuple[str, str]:

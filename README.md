@@ -53,7 +53,7 @@
 1. 把本目录放入主程序的 `plugins/foxzone/`
 2. 依赖声明在 `manifest.json` 中，系统将自动尝试安装，或可手动运行安装：
    ```bash
-   uv pip install aiohttp beautifulsoup4 json5 orjson Pillow
+   uv pip install aiohttp beautifulsoup4 json5 orjson
    ```
 3. 在 `config/plugins/foxzone/config.toml` 中启用插件：
    ```toml

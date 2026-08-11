@@ -17,8 +17,6 @@ from .. import SERVICE_SIG
 
 logger = get_logger("foxzone.tool.like", color=COLOR.CYAN)
 
-_SERVICE_SIG = SERVICE_SIG
-
 
 class QZoneLikeTool(BaseTool):
     """为指定说说点赞的对外 Tool。"""
@@ -46,7 +44,7 @@ class QZoneLikeTool(BaseTool):
         """
         from ..service import QZoneService
 
-        service: QZoneService | None = get_service(_SERVICE_SIG)  # type: ignore[assignment]
+        service: QZoneService | None = get_service(SERVICE_SIG)  # type: ignore[assignment]
         if service is None:
             return False, "FoxZone 服务未注册"
 

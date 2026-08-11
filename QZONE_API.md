@@ -16,7 +16,7 @@
 
 FoxZone 通过 `src.app.plugin_system.api.adapter_api` 获取已启动的 QQ 适配器实例，
 调用其统一的 `get_cookies` action 取回 Cookie 字符串。
-适配器签名留空时自动探测已启动的 QQ 适配器；
+适配器签名留空时遍历所有已启动且支持 API 透传的适配器，首个成功即返回；
 也可在 `config.toml [cookie].adapter_signature` 显式指定。无需额外开启 HTTP 服务器。
 
 ### 1.2 Cookie 域名
@@ -220,7 +220,7 @@ Connection: keep-alive
 
 ### 3.5 回复评论（二级评论）
 
-> **2026-04 更新**：通过浏览器 DevTools 抓包对照修复了反爬触发问题。子域回退到 `user.qzone.qq.com`，`commentUin` 含义、`paramstr`、`content` 提及格式等均按浏览器实际请求重新对齐。
+> 字段语义与请求特征以浏览器 DevTools 实际抓包为准对齐。任何字段偏差都会触发 QZone 反爬伪装错误 `-10049`。
 
 **端点**：`POST https://user.qzone.qq.com/proxy/domain/taotao.qzone.qq.com/cgi-bin/emotion_cgi_re_feeds`
 
@@ -277,17 +277,10 @@ frameElement\.callback\s*\(\s*(\{[\s\S]*?\})\s*\)
 
 `code=0` 表示成功；`code=-10049` 表示触发反爬（实为请求特征异常被识别，并非真限流）；`code=-3000` 表示 cookie 失效。
 
-**⚠️ 字段语义勘误（关键）**：
-- `commentUin` 在 reply 接口里是"**操作者 uin**"（即 Bot 自身），不是被回复评论的作者 QQ。早期实现把评论作者 QQ 当成 `commentUin` 传，会被 QZone 反爬识别为请求特征异常返回 `-10049 使用人数过多`。
+**⚠️ 字段语义（关键）**：
+- `commentUin` 在 reply 接口里是"**操作者 uin**"（即 Bot 自身），不是被回复评论的作者 QQ。写错会被 QZone 反爬识别为请求特征异常，返回 `-10049 使用人数过多`。
 - 被回复者的 QQ 与昵称必须以 `@{uin:xxx,nick:xxx,auto:1} ` 前缀写入 `content` 字段，否则同样触发反爬。
 - `commentId` 必须是**顶层一级评论的 tid**。当用户回复的是二级评论时，需要从评论树里向上溯源到顶层评论。
-
-**⚠️ 历史变更**：
-- 旧版使用 `parent_tid` 字段，现已改为 `commentId`
-- 子域：`user.qzone.qq.com` → 误改为 `h5.qzone.qq.com` → **回退** `user.qzone.qq.com`
-- `paramstr`：曾误设为 `"2"`，**实际应为 `"1"`**
-- 缺失字段补齐：`isSignIn`、`Sec-CH-UA-*` 系列头
-- `qzreferrer` 去掉末尾 `/main`
 
 ---
 
@@ -380,7 +373,7 @@ QQ 空间 API 响应为非标准 JSON，存在以下格式变体：
 
 ## 六、已知问题与注意事项
 
-1. **回复端点域名**：回复（二级评论）与评论（一级评论）接口均使用 `user.qzone.qq.com` 子域（详见 §3.5 的 2026-04 抓包勘误——曾误改为 `h5.qzone.qq.com` 并触发 -10049，已回退）。
+1. **回复端点域名**：回复（二级评论）与评论（一级评论）接口均使用 `user.qzone.qq.com` 子域（详见 §3.5）。
 
 2. **`commentId` vs `parent_tid`**：旧版回复参数 `parent_tid` 已不再有效，必须改用 `commentId` + `commentUin` 组合。
 
@@ -419,8 +412,8 @@ QQ 空间 API 响应为非标准 JSON，存在以下格式变体：
 
 ### 7.4 串行化发送（runtime 实例锁）
 
-发送循环通过 `QZoneRuntime.reply_send_lock`（`asyncio.Lock`）串行化。由于 runtime 是插件级单例，实例级锁即可全局生效（旧版因 Service 非单例被迫使用模块级锁，且手动 acquire/release 存在异常路径锁泄漏，现已由 `BatchSendEngine` 的 `async with` 从结构上消除）。LLM 决策不持锁，仍可并发。
+发送循环通过 `QZoneRuntime.reply_send_lock`（`asyncio.Lock`）串行化。runtime 是插件级单例，实例级锁即可在插件内全局生效。LLM 决策不持锁，仍可并发。
 
 ### 7.5 `InteractionLog` 一致性
 
-持久化状态（`interaction_log.json` 等）由插件级单例 `QZoneRuntime` 统一持有，旧版「非单例 Service 并发写覆盖」的 race 已从根上消除。
+持久化状态（`interaction_log.json` 等）由插件级单例 `QZoneRuntime` 统一持有。

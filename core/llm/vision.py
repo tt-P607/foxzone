@@ -1,9 +1,7 @@
 """统一的批量图片视觉识别。
 
-合并原 ``QZoneService.describe_images``（自建 aiohttp + vision_cache）与
-``ContentService._batch_recognize_images``（media_api）两套实现。
-保留 vision_cache 持久化缓存方案——QZone 图片 URL 长期不变，
-跨重启缓存比进程内缓存更有价值。
+批量下载图片并调用视觉 LLM 生成描述，结果经 vision_cache 持久化缓存。
+QZone 图片 URL 长期不变，跨重启缓存可避免对同一图片重复推理。
 """
 
 from __future__ import annotations

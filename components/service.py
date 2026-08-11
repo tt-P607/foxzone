@@ -23,6 +23,7 @@ from ..core.interaction_log import SOURCE_AGENT
 from ..core.llm.vision import describe_images
 
 if typing.TYPE_CHECKING:
+    from ..config import FoxZoneConfig
     from ..plugin import FoxZonePlugin
     from ..runtime import QZoneRuntime
 
@@ -46,7 +47,7 @@ class QZoneService(BaseService):
         return self._plugin.runtime
 
     @property
-    def _cfg(self):
+    def _cfg(self) -> "FoxZoneConfig":
         """插件配置。"""
         return self._rt.config
 
