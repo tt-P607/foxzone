@@ -46,8 +46,8 @@ async def friend_monitor_once(runtime: "QZoneRuntime", num_feeds: int) -> None:
         return
 
     logger.info(
-        f"[bold #F38BA8]好友说说监控：获取到 [bold #CBA6F7]{len(feeds)}[/bold #CBA6F7]"
-        f" 条候选动态，开始逐条过滤…[/bold #F38BA8]"
+        f"[#F38BA8]好友说说监控：获取到 [#CBA6F7]{len(feeds)}[/#CBA6F7]"
+        f" 条候选动态，开始逐条过滤…[/#F38BA8]"
     )
     candidate_feeds: list[dict[str, Any]] = []
     for feed in feeds:
@@ -60,8 +60,8 @@ async def friend_monitor_once(runtime: "QZoneRuntime", num_feeds: int) -> None:
         # 已互动（点赞或评论）则跳过
         if runtime.interaction_log.has_interacted(target_qq, tid):
             logger.info(
-                f"[bold #F5A97F]跳过已互动说说 (qq=[bold #CBA6F7]{target_qq}"
-                f"[/bold #CBA6F7], tid={tid})[/bold #F5A97F]"
+                f"[#F5A97F]跳过已互动说说 (qq=[#CBA6F7]{target_qq}"
+                f"[/#CBA6F7], tid={tid})[/#F5A97F]"
             )
             continue
 
@@ -92,8 +92,8 @@ async def friend_monitor_once(runtime: "QZoneRuntime", num_feeds: int) -> None:
         runtime.interaction_log.mark(target_qq, tid, ACTION_LIKE, SOURCE_POLL)
         await runtime.interaction_log.save()
         logger.info(
-            f"[bold #F38BA8]自动点赞成功 (qq=[bold #CBA6F7]{target_qq}"
-            f"[/bold #CBA6F7], tid={tid})[/bold #F38BA8]"
+            f"[#F38BA8]自动点赞成功 (qq=[#CBA6F7]{target_qq}"
+            f"[/#CBA6F7], tid={tid})[/#F38BA8]"
         )
 
         # 仅点赞成功的说说才进入 LLM 评论决策
@@ -115,9 +115,9 @@ async def friend_monitor_once(runtime: "QZoneRuntime", num_feeds: int) -> None:
         })
 
     logger.info(
-        f"[bold #F38BA8]好友说说监控：候选 [bold #CBA6F7]{len(candidate_feeds)}"
-        f"[/bold #CBA6F7] 条，已点赞 [bold #CBA6F7]{len(feed_items)}"
-        f"[/bold #CBA6F7] 条。[/bold #F38BA8]"
+        f"[#F38BA8]好友说说监控：候选 [#CBA6F7]{len(candidate_feeds)}"
+        f"[/#CBA6F7] 条，已点赞 [#CBA6F7]{len(feed_items)}"
+        f"[/#CBA6F7] 条。[/#F38BA8]"
     )
     if not feed_items:
         return
@@ -151,8 +151,8 @@ async def process_feed_monitor_batch(
         )
 
     logger.info(
-        f"[bold #F38BA8]批量决策 [bold #CBA6F7]{len(feed_items)}[/bold #CBA6F7]"
-        f" 条已点赞好友说说是否需要评论…[/bold #F38BA8]"
+        f"[#F38BA8]批量决策 [#CBA6F7]{len(feed_items)}[/#CBA6F7]"
+        f" 条已点赞好友说说是否需要评论…[/#F38BA8]"
     )
     try:
         feed_decisions = await runtime.content.generate_feed_decisions(feed_items)
@@ -193,9 +193,9 @@ async def process_feed_monitor_batch(
         await runtime.interaction_log.save()
         content_preview = truncate_preview(str(item.get("content", "") or "（无正文）"))
         logger.info(
-            f"[bold #F38BA8]评论成功：QQ [bold #CBA6F7]{target_qq}[/bold #CBA6F7]"
-            f" 的说说「[bold #CBA6F7]{content_preview}[/bold #CBA6F7]」"
-            f" → 「{comment_text}」[/bold #F38BA8]"
+            f"[#F38BA8]评论成功：QQ [#CBA6F7]{target_qq}[/#CBA6F7]"
+            f" 的说说「[#CBA6F7]{content_preview}[/#CBA6F7]」"
+            f" → 「{comment_text}」[/#F38BA8]"
         )
 
     def _label(item: dict[str, Any]) -> str:
@@ -214,8 +214,8 @@ async def process_feed_monitor_batch(
         决策结果="\n".join(result.lines) if result.lines else "（无）",
     )
     logger.info(
-        f"[bold #F38BA8]好友说说监控批量处理完成：共 [bold #CBA6F7]{len(feed_items)}"
-        f"[/bold #CBA6F7] 条，评论 [bold #CBA6F7]{result.succeeded}"
-        f"[/bold #CBA6F7] 条。[/bold #F38BA8]"
+        f"[#F38BA8]好友说说监控批量处理完成：共 [#CBA6F7]{len(feed_items)}"
+        f"[/#CBA6F7] 条，评论 [#CBA6F7]{result.succeeded}"
+        f"[/#CBA6F7] 条。[/#F38BA8]"
     )
     return {"commented": result.succeeded, "decisions": decision_map}

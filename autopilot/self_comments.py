@@ -124,7 +124,7 @@ async def poll_self_comments_once(
         return
 
     logger.info(
-        f"[bold #F38BA8]本次轮询发现 [bold #CBA6F7]{len(new_items)}[/bold #CBA6F7]"
-        f" 条新评论，开始批量处理。[/bold #F38BA8]"
+        f"[#F38BA8]本次轮询发现 [#CBA6F7]{len(new_items)}[/#CBA6F7]"
+        f" 条新评论，开始批量处理。[/#F38BA8]"
     )
     await process_reply_batch(runtime, new_items)

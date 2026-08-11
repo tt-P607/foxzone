@@ -343,10 +343,10 @@ async def process_reply_batch(
         feed_preview = truncate_preview(str(item.get("feed_content", "") or "（无正文）"))
         commenter = item.get("commenter_name", "未知用户")
         logger.info(
-            f"[bold #F38BA8]接力回复成功：QQ [bold #CBA6F7]{host_qq}"
-            f"[/bold #CBA6F7] 的说说「[bold #CBA6F7]{feed_preview}[/bold #CBA6F7]」"
-            f" 下回复 [bold #CBA6F7]{commenter}[/bold #CBA6F7]"
-            f" → 「{reply_text}」[/bold #F38BA8]"
+            f"[#F38BA8]接力回复成功：QQ [#CBA6F7]{host_qq}"
+            f"[/#CBA6F7] 的说说「[#CBA6F7]{feed_preview}[/#CBA6F7]」"
+            f" 下回复 [#CBA6F7]{commenter}[/#CBA6F7]"
+            f" → 「{reply_text}」[/#F38BA8]"
         )
         # 续期 last_ts，避免持续对话中的 feed 被 max_feed_age_hours 过滤掉
         runtime.interaction_log.mark(host_qq, feed_id, ACTION_COMMENT, SOURCE_POLL)

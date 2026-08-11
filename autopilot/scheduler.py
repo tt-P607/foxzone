@@ -24,6 +24,9 @@ if typing.TYPE_CHECKING:
 
 logger = get_logger("foxzone.autopilot", color=COLOR.CYAN)
 
+#: 适配器进入活跃列表后，等待 WebSocket 长连接建立完成的额外秒数。
+_ADAPTER_SETTLE_SECONDS = 10.0
+
 
 class Autopilot:
     """FoxZone 自治调度器：管理三条定时循环。
@@ -165,20 +168,23 @@ class Autopilot:
         await once(bot_qq)
 
     async def _wait_for_adapters(self, timeout: float = 60.0) -> bool:
-        """等待 QQ 适配器启动就绪后再执行轮询。
+        """等待 QQ 适配器完全启动就绪后再执行轮询。
 
         适配器由框架在 ``ON_ALL_PLUGIN_LOADED`` 事件后于后台启动，
-        首次轮询前先等待其就绪，避免适配器未就绪时白跑一次。
+        进入活跃列表时 WebSocket 长连接可能尚未建立。检测到可用适配器后
+        再额外等待 ``_ADAPTER_SETTLE_SECONDS`` 秒，让长连接建立完成，
+        避免首次轮询因 WebSocket 未就绪而白跑一次。
 
         Args:
-            timeout: 最长等待秒数
+            timeout: 最长等待秒数（不含就绪后的额外等待）
 
         Returns:
-            True 表示已检测到可用适配器；超时返回 False
+            True 表示已等待适配器就绪；超时返回 False
         """
         deadline = asyncio.get_running_loop().time() + timeout
         while asyncio.get_running_loop().time() < deadline:
             if self._runtime.has_cookie_adapter():
+                await asyncio.sleep(_ADAPTER_SETTLE_SECONDS)
                 return True
             await asyncio.sleep(2.0)
         return False

@@ -154,8 +154,8 @@ class FeedsMixin(QZoneClientBase):
                 )
 
             logger.info(
-                f"[bold #F38BA8]从 QQ [bold #CBA6F7]{target_qq}[/bold #CBA6F7] 的空间"
-                f"获取到 [bold #CBA6F7]{len(feeds_list)}[/bold #CBA6F7] 条说说[/bold #F38BA8]"
+                f"[#F38BA8]从 QQ [#CBA6F7]{target_qq}[/#CBA6F7] 的空间"
+                f"获取到 [#CBA6F7]{len(feeds_list)}[/#CBA6F7] 条说说[/#F38BA8]"
             )
             return feeds_list
 
@@ -451,8 +451,8 @@ class FeedsMixin(QZoneClientBase):
                 )
 
             logger.info(
-                f"[bold #F38BA8]监控发现 [bold #CBA6F7]{len(feeds_list)}[/bold #CBA6F7]"
-                f" 条未处理的新说说[/bold #F38BA8]"
+                f"[#F38BA8]监控发现 [#CBA6F7]{len(feeds_list)}[/#CBA6F7]"
+                f" 条未处理的新说说[/#F38BA8]"
             )
             return feeds_list
 

@@ -114,11 +114,11 @@ class CookieService:
             if cookies:
                 if qq_account:
                     logger.info(
-                        f"[bold #F38BA8]从适配器获取 QQ [bold #CBA6F7]{qq_account}"
-                        f"[/bold #CBA6F7] 的 Cookie 成功[/bold #F38BA8]"
+                        f"[#F38BA8]从适配器获取 QQ [#CBA6F7]{qq_account}"
+                        f"[/#CBA6F7] 的 Cookie 成功[/#F38BA8]"
                     )
                 else:
-                    logger.info("[bold #F38BA8]从适配器获取 Cookie 成功[/bold #F38BA8]")
+                    logger.info("[#F38BA8]从适配器获取 Cookie 成功[/#F38BA8]")
                 if qq_account:
                     self._save_to_file(qq_account, cookies)
                 return cookies
@@ -239,9 +239,9 @@ class CookieService:
 
             delay = base_delay * (attempt + 1)
             logger.info(
-                f"[bold #F5A97F]从适配器获取 Cookie 失败，[/bold #F5A97F]"
-                f"[bold #CBA6F7]{delay:.0f} 秒后重试"
-                f"（第 {attempt + 1}/{retry_times} 次）...[/bold #CBA6F7]"
+                f"[#F5A97F]从适配器获取 Cookie 失败，[/#F5A97F]"
+                f"[#CBA6F7]{delay:.0f} 秒后重试"
+                f"（第 {attempt + 1}/{retry_times} 次）...[/#CBA6F7]"
             )
             await asyncio.sleep(delay)
 
