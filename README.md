@@ -14,7 +14,7 @@
 | **读取动态** | 拉取自己/好友的最近说说，提取文本与图片描述供 LLM 使用 |
 | **评论与点赞** | 提供 `qzone_post_comment` / `qzone_like_feed` 工具供 LLM 自主调用 |
 | **自动回复** | 轮询自己说说下的评论，LLM 批量决策回复内容并发送 |
-| **好友动态监控** | 周期性扫描好友 timeline，先点赞再决策是否评论 |
+| **好友动态监控** | 周期性扫描好友 timeline，由 LLM 逐条决策是否点赞/评论（默认 AI 自主决定，可开启始终点赞） |
 | **外部接力回复** | 检查 Bot 在他人说说下评论后，是否有人回复 Bot 的评论；命中则继续接力（默认关闭） |
 
 ---
@@ -89,6 +89,7 @@ enable_external_followup = false  # 外部接力回查独立开关（默认关�
 external_followup_minutes = 60    # 外部回查间隔
 external_followup_batch = 1       # 每轮最多检查多少个 QQ
 enable_friend_monitor = false     # 好友动态主动互动
+always_like = false               # 始终点赞开关（false 时由 LLM 逐条决策点赞/评论）
 friend_monitor_interval_minutes = 30
 dnd_enabled = false
 dnd_start_hour = 23
