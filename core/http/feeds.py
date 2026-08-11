@@ -162,8 +162,7 @@ class FeedsMixin(QZoneClientBase):
         except RuntimeError:
             raise
         except Exception as e:
-            import traceback
-            logger.error(f"获取说说列表失败: {e}\n{traceback.format_exc()}")
+            logger.error(f"获取说说列表失败: {e}")
             return []
 
     async def _fetch_all_comments(

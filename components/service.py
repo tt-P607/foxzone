@@ -44,7 +44,7 @@ class QZoneService(BaseService):
     @property
     def _rt(self) -> "QZoneRuntime":
         """插件级运行时单例。"""
-        return self._plugin.runtime
+        return self._plugin.runtime  # type: ignore[attr-defined]
 
     @property
     def _cfg(self) -> "FoxZoneConfig":

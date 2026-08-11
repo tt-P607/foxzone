@@ -152,8 +152,8 @@ class CommentsMixin(QZoneClientBase):
             resp_text = await self._request(
                 "POST", COMMENT_URL, params={"g_tk": self._gtk}, data=data, headers=reply_headers
             )
-            # 详细调试日志：输出请求关键字段和响应原文，便于诊断 reply 是否真发出
-            logger.info(
+            # 调试日志：输出请求关键字段和响应原文，便于诊断 reply 是否真发出
+            logger.debug(
                 f"reply 调用: feed_id={feed_id}, host_qq={host_qq}, "
                 f"commentId={comment_tid}, 被回复者={commenter_qq}, "
                 f"target_name={target_name!r}, content_len={len(content)}"
@@ -163,8 +163,7 @@ class CommentsMixin(QZoneClientBase):
                 resp_data = orjson.loads(resp_text)
                 code = resp_data.get("code", -1)
                 if code == 0:
-                    # 成功也打印一下完整响应，便于核对
-                    logger.info(
+                    logger.debug(
                         f"reply 接口返回 code=0: "
                         f"new_tid={resp_data.get('tid') or resp_data.get('commentid')}, "
                         f"raw_keys={list(resp_data.keys())}"
