@@ -19,7 +19,7 @@ logger = get_logger("foxzone.tool.comment", color=COLOR.CYAN)
 
 _SERVICE_SIG = SERVICE_SIG
 
-#: ``QZoneCommentTool.tool_description`` 中拼接给 LLM 的评论硬性约束。
+#: ``QZoneCommentTool.description`` 中拼接给 LLM 的评论硬性约束。
 #:
 #: 这是 Tool 的硬编码"调用合同"（schema 描述），不属于用户可调提示词，
 #: 所以不外置到 ``config.toml``。它**不会**被替换为 ``config.prompts.comment_guidelines``。
@@ -37,8 +37,8 @@ _TOOL_COMMENT_GUIDELINES: str = (
 class QZoneCommentTool(BaseTool):
     """在指定说说下发表评论的对外 Tool。"""
 
-    tool_name = "qzone_post_comment"
-    tool_description = (
+    name = "qzone_post_comment"
+    description = (
         "在指定 QQ 用户的某条说说下发表一条评论。"
         "需要先通过 qzone_read_feed 读取说说获得 tid，再用此工具评论。"
         "适合外部 chatter 自己看完说说后精细控制评论内容的场景。\n\n"

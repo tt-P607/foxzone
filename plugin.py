@@ -1,16 +1,17 @@
 ﻿"""FoxZone（墨狐空间）插件入口。
 
 功能概览：
-- 发布 QQ 空间说说（支持 AI 配图：SiliconFlow / NovelAI）
+- 发布 QQ 空间说说
 - 读取并与好友说说互动（点赞、评论）
-- 自动监控好友动态
-- 自动回复自己说说下的评论（通过 QZoneAdapter + QZoneChatter）
+- 自动监控好友动态、自动回复自己说说下的评论、外部空间接力回复
 
-架构说明：
-- `plugin.py` 仅负责插件装配与生命周期管理
-- 核心 HTTP 逻辑位于 `core/api_client.py`（QZoneAPIClient）
-- 框架组件位于 `components/`（QZoneService 等）
-- LLM 提示词通过 PromptManager 统一管理（见 `prompts.py`）
+架构说明（详见 plans/refactor_foxzone.md）：
+- `plugin.py` 负责装配与生命周期：持有 QZoneRuntime（插件级状态单例）
+  并启停 Autopilot（三条定时循环）
+- `runtime.py` 集中持有全部持久化状态与发送串行锁
+- `components/` 为对外契约层（Service 原子门面 / 3 个 Tool / Command）
+- `autopilot/` 为自治层（调度 + BatchSendEngine + 三条流程）
+- `core/` 为能力层（http 客户端 / llm 生成 / 评论树等）
 """
 
 from __future__ import annotations
@@ -20,19 +21,13 @@ from typing import cast
 from src.app.plugin_system.api.log_api import get_logger, COLOR
 from src.app.plugin_system.base import BasePlugin, register_plugin
 
-from .components.adapter import QZoneAdapter
-from .components.chatter import QZoneChatter
+from .autopilot import Autopilot
 from .components.commands import SendFeedCommand
 from .components.service import QZoneService
-from .components.tools import (
-    QZoneCommentTool,
-    QZoneLikeTool,
-    QZoneStartComposeFeedTool,
-    QZoneSubmitFeedTool,
-    ReadFeedTool,
-)
+from .components.tools import QZoneCommentTool, QZoneLikeTool, ReadFeedTool
 from .config import FoxZoneConfig
 from .prompts import register_foxzone_prompts
+from .runtime import QZoneRuntime
 
 logger = get_logger("foxzone.plugin", color=COLOR.ORANGE)
 
@@ -42,16 +37,22 @@ class FoxZonePlugin(BasePlugin):
     """FoxZone QQ 空间助手插件。
 
     提供向 QQ 空间自动发送/读取说说、与好友动态互动的能力，
-    整合 LLM 内容生成与 AI 图片生成（SiliconFlow / NovelAI）。
+    整合 LLM 内容生成（说说/评论/互动决策）。
+
+    Attributes:
+        runtime: 插件级运行时状态容器（on_plugin_loaded 时创建）
+        autopilot: 自治调度器（on_plugin_loaded 时创建并启动）
     """
 
     plugin_name = "foxzone"
-    plugin_version = "1.0.0"
-    plugin_author = "MoFox Team"
+    plugin_author = "言柒"
     plugin_description = "QQ 空间助手：自动发送说说、读取互动好友动态"
 
     # 声明插件配置类，框架会在实例化前自动加载
     configs = [FoxZoneConfig]
+
+    runtime: QZoneRuntime
+    autopilot: Autopilot
 
     # ------------------------------------------------------------------
     # 生命周期钩子
@@ -63,10 +64,11 @@ class FoxZonePlugin(BasePlugin):
         执行顺序：
         1. 读取 ``general.enabled``，为 False 则跳过后续初始化
         2. 注册 PromptManager 提示词模板
-        3. 预热 QZoneService 的持久化状态
+        3. 创建并初始化 QZoneRuntime（加载持久化状态，全插件唯一）
+        4. 启动 Autopilot 三条定时循环
 
         Raises:
-            任何注册或服务初始化阶段的异常都会向上传播，
+            任何注册或初始化阶段的异常都会向上传播，
             由插件管理器记录并标记加载失败，不在此处吞异常。
         """
         cfg = cast(FoxZoneConfig, self.config)
@@ -74,23 +76,27 @@ class FoxZonePlugin(BasePlugin):
             logger.warning("FoxZone 插件未启用（general.enabled=false），跳过初始化。")
             return
 
-        # 1. 注册提示词模板（所有模板文本来自 config.prompts，由配置框架
+        # 1. 注册提示词模板（模板文本来自 config.prompts，由配置框架
         #    根据 PromptsSection 的 Field(default=...) 自动落盘到 config.toml）
         register_foxzone_prompts(cfg)
         logger.info("FoxZone 提示词模板注册完成。")
 
-        # 2. 预热服务持久化状态（ReplyTracker 等）
-        # 注意：直接实例化 QZoneService，避免在 on_plugin_loaded 阶段
-        # 通过 service_manager.get_service() 获取（此时插件尚未被
-        # plugin_manager 标记为已加载，会触发"插件未加载"警告）。
-        service = QZoneService(plugin=self)
-        await service.initialize()
-        logger.info("FoxZone 服务初始化完成。")
+        # 2. 创建插件级运行时单例并加载持久化状态
+        self.runtime = QZoneRuntime(self)
+        await self.runtime.initialize()
+
+        # 3. 启动自治调度循环
+        self.autopilot = Autopilot(self.runtime)
+        await self.autopilot.start()
 
         logger.info("FoxZone 插件加载完成。")
 
     async def on_plugin_unloaded(self) -> None:
-        """插件卸载时的清理回调。"""
+        """插件卸载时的清理回调：停止循环并落盘状态。"""
+        cfg = cast(FoxZoneConfig, self.config)
+        if cfg.general.enabled:
+            await self.autopilot.stop()
+            await self.runtime.shutdown()
         logger.info("FoxZone 插件已卸载。")
 
     # ------------------------------------------------------------------
@@ -112,22 +118,7 @@ class FoxZonePlugin(BasePlugin):
             ReadFeedTool,
             QZoneCommentTool,
             QZoneLikeTool,
+            SendFeedCommand,
+            QZoneService,
         ]
-
-        if cfg.general.expose_feed_write_tools:
-            components.extend(
-                [
-                    QZoneStartComposeFeedTool,
-                    QZoneSubmitFeedTool,
-                ]
-            )
-
-        components.extend(
-            [
-                SendFeedCommand,
-                QZoneService,
-                QZoneAdapter,
-                QZoneChatter,
-            ]
-        )
         return components

@@ -22,8 +22,8 @@ class ReadFeedTool(BaseTool):
     评论等完整快照，为后续互动或回复提供上下文。
     """
 
-    tool_name = "qzone_read_feed"
-    tool_description = "读取指定 QQ 用户最近的 QQ 空间说说，包含正文、图片描述、评论等完整内容"
+    name = "qzone_read_feed"
+    description = "读取指定 QQ 用户最近的 QQ 空间说说，包含正文、图片描述、评论等完整内容"
 
     async def execute(
         self,

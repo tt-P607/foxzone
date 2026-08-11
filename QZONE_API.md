@@ -11,8 +11,13 @@
 ### 1.1 流程概述
 
 ```
-请求方 → Napcat HTTP API → 解析 Cookie 字符串 → 缓存至本地 JSON → 使用 Cookie 访问 QQ 空间 API
+请求方 → 适配器 get_cookies action → 解析 Cookie 字符串 → 缓存至本地 JSON → 使用 Cookie 访问 QQ 空间 API
 ```
+
+FoxZone 通过 `src.app.plugin_system.api.adapter_api` 获取已启动的 QQ 适配器实例，
+调用其统一的 `get_cookies` action 取回 Cookie 字符串。
+适配器签名留空时自动探测已启动的 QQ 适配器；
+也可在 `config.toml [cookie].adapter_signature` 显式指定。无需额外开启 HTTP 服务器。
 
 ### 1.2 Cookie 域名
 
@@ -20,26 +25,15 @@
 |------|-----|
 | 域名 | `user.qzone.qq.com` |
 
-### 1.3 Napcat HTTP 获取 Cookie
+### 1.3 适配器获取 Cookie
 
-**端点**：`POST http://<host>:<port>/get_cookies`
-
-**请求头**：
-```http
-Content-Type: application/json
-Authorization: Bearer <napcat_token>   # 可选，无 token 时省略
-```
-
-**请求体**：
-```json
-{
-  "domain": "user.qzone.qq.com"
-}
-```
+**调用**：经适配器统一透传 `get_cookies` action（各 QQ 适配器同命令名），
+参数为 `{"domain": "user.qzone.qq.com"}`。
 
 **响应结构**：
 ```json
 {
+  "status": "ok",
   "data": {
     "cookies": "uin=o123456789; skey=@abcdefgh; p_skey=xyz..."
   }
@@ -50,7 +44,7 @@ Authorization: Bearer <napcat_token>   # 可选，无 token 时省略
 
 | 字段 | 说明 | 示例 |
 |------|------|------|
-| `uin` | QQ 号，带 `o` 前缀 | `o3910007334` |
+| `uin` | QQ 号，带 `o` 前缀 | `o123456789` |
 | `skey` | 登录凭证，带 `@` 前缀 | `@Abc12345` |
 | `p_skey` | 用于计算 gtk2，二级域名 key | `AbcDef...` |
 
@@ -379,20 +373,20 @@ QQ 空间 API 响应为非标准 JSON，存在以下格式变体：
 |------|------|---------|
 | `0` | 成功 | — |
 | `-1` | 未知错误 | 记录日志 |
-| `-3000` | Cookie 失效 / 登录过期 | 清除本地缓存，重新从 Napcat 获取 |
+| `-3000` | Cookie 失效 / 登录过期 | 清除本地缓存，重新从适配器获取 |
 | `-403` / `403` | 权限不足（非好友/隐私设置） | 记录日志，跳过 |
 
 ---
 
 ## 六、已知问题与注意事项
 
-1. **回复端点域名变更**：回复（二级评论）接口必须使用 `h5.qzone.qq.com`，否则返回 403 或权限错误。评论（一级评论）接口仍使用 `user.qzone.qq.com`。
+1. **回复端点域名**：回复（二级评论）与评论（一级评论）接口均使用 `user.qzone.qq.com` 子域（详见 §3.5 的 2026-04 抓包勘误——曾误改为 `h5.qzone.qq.com` 并触发 -10049，已回退）。
 
 2. **`commentId` vs `parent_tid`**：旧版回复参数 `parent_tid` 已不再有效，必须改用 `commentId` + `commentUin` 组合。
 
 3. **Cookie 缓存策略**：Cookie 缓存于 `data/foxzone/cookies/cookies-<qq>.json`。当 API 返回 code=-3000 时，需调用 `CookieService.clear_cache()` 清除缓存并重新获取。
 
-4. **Napcat 连接**：Cookie 获取依赖 Napcat HTTP API，确保 Napcat 正常运行，且配置中的 `http_fallback_host`、`http_fallback_port` 与 Napcat 一致。
+4. **适配器可用性**：Cookie 获取依赖已启动的 QQ 适配器透传 `get_cookies` action。若本地缓存失效，请确保至少一个适配器在线；也可在 `config.toml [cookie].adapter_signature` 显式指定。
 
 5. **Chrome UA 必要性**：部分 QQ 空间接口会检查 User-Agent，建议所有请求均使用最新 Chrome UA，避免被反爬限制。
 
@@ -401,11 +395,11 @@ QQ 空间 API 响应为非标准 JSON，存在以下格式变体：
 
 ---
 
-## 四、外部回查实现要点
+## 七、外部回查实现要点
 
-外部回查（`adapter._external_followup_once` + `service.process_external_followup_batch`）用于检测他人对 Bot 评论的接力回复并自动回应。以下要点直接关系到接口能否调通：
+外部回查（`autopilot/external.py` 的 `external_followup_once` + `process_reply_batch`）用于检测他人对 Bot 评论的接力回复并自动回应。以下要点直接关系到接口能否调通：
 
-### 4.1 单条说说详情：`emotion_cgi_msgdetail_v6`
+### 7.1 单条说说详情：`emotion_cgi_msgdetail_v6`
 
 - 端点：`GET https://h5.qzone.qq.com/proxy/domain/taotao.qq.com/cgi-bin/emotion_cgi_msgdetail_v6`
   - 子域必须是 `taotao.qq.com`，不是 `taotao.qzone.qq.com`，写错会返回 `code=-10004`。
@@ -413,19 +407,20 @@ QQ 空间 API 响应为非标准 JSON，存在以下格式变体：
 - 响应是 JSONP，需先剥掉 `_Callback(...)` 或 `frameElement.callback(...)` 外壳再 JSON 解析。
 - 用途：评论一旦超出 `msglist_v6` 时间线最近 5 条一级评论范围，必须靠该接口拿到完整评论树才能解析 `parent_tid` 的根节点。
 
-### 4.2 评论 `tid` 是局部序号
+### 7.2 msglist_v6 内嵌评论 `tid` 是局部序号
 
-QZone 评论的 `tid` 始终是该说说内的局部序号（如 `"1"`、`"9"`），不是 hex 全局 tid。`reply` 接口的 `commentId` 字段直接接受局部 tid，无需任何转换。
+`msglist_v6` 内嵌 `list_3` 楼中楼的 `tid` 是该说说内的局部序号（如 `"1"`、`"9"`），不是 hex 全局 tid；`msgdetail_v6` 才返回 hex 全局 tid。`reply` 接口的 `commentId` 必须是**顶层一级评论的 hex tid**——若溯源后仍是局部序号形态（`core/comment_tree.py` 的 `is_local_seq_tid` 预检），说明缺一级父节点，直接跳过避免触发 -10049。
 
-### 4.3 限流处理（`-10049`）
+### 7.3 限流处理（`-10049`）
 
-- `reply` 接口触发 `-10049 使用人数过多` 时，*单条*跳过：标记该评论已处理，避免下轮回查再次触发，循环继续处理本批后续条目。
-- 不要因 `-10049` 终止整批，否则同一批被反复重试反而扩大限流面。
+- 外部接力路径：`reply` 触发 `-10049` 时**单条**跳过（标记该评论已处理，避免下轮重复触发），循环继续处理本批后续条目。
+- 好友监控评论路径：触发限流即**终止整批**，剩余项保持未标记以便下轮再试。
+- 两种策略由 `autopilot/engine.py` 的 `BatchPolicy.stop_batch_on_rate_limit` 参数区分。
 
-### 4.4 串行化 reply 发送（模块级锁）
+### 7.4 串行化发送（runtime 实例锁）
 
-`QZoneService` 是非单例（每次 `get_service` 新建实例），多个 batch 任务并发时会各自持有锁副本无效。改用模块级 `_REPLY_SEND_LOCK`（`asyncio.Lock`）串行所有 batch 的发送循环，LLM 决策仍可并发。这是降低 `-10049` 触发面的关键约束。
+发送循环通过 `QZoneRuntime.reply_send_lock`（`asyncio.Lock`）串行化。由于 runtime 是插件级单例，实例级锁即可全局生效（旧版因 Service 非单例被迫使用模块级锁，且手动 acquire/release 存在异常路径锁泄漏，现已由 `BatchSendEngine` 的 `async with` 从结构上消除）。LLM 决策不持锁，仍可并发。
 
-### 4.5 已知遗留：`InteractionLog` 跨实例 race
+### 7.5 `InteractionLog` 一致性
 
-`QZoneService` 非单例导致 `interaction_log.json` 的标记与持久化在并发 batch 间存在 race，可能丢失部分 `mark_followup_checked` 记录。当前未处理，依靠 `mark_comment_replied` 在 reply 成功路径上作为最终一致性兜底。
+持久化状态（`interaction_log.json` 等）由插件级单例 `QZoneRuntime` 统一持有，旧版「非单例 Service 并发写覆盖」的 race 已从根上消除。

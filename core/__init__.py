@@ -1,16 +1,31 @@
 """FoxZone 插件核心业务模块。
 
-包含 QQ 空间 API 客户端等与框架无关的纯业务逻辑。
+包含 QQ 空间 HTTP 客户端、LLM 内容生成、评论树工具等
+与框架组件系统无关的纯业务逻辑。
 """
 
-from .api_client import QZoneAPIClient
-from .content import ContentService
+from .comment_tree import (
+    build_threaded_view,
+    is_local_seq_tid,
+    resolve_root_comment,
+    resolve_root_comment_tid,
+)
 from .cookie import CookieService
+from .http import QZoneAPIClient
+from .interaction_log import InteractionLog
+from .llm import ContentService
 from .reply_tracker import ReplyTrackerService
+from .vision_cache import ImageVisionCache
 
 __all__ = [
-	"QZoneAPIClient",
-	"ContentService",
-	"CookieService",
-	"ReplyTrackerService",
+    "ContentService",
+    "CookieService",
+    "ImageVisionCache",
+    "InteractionLog",
+    "QZoneAPIClient",
+    "ReplyTrackerService",
+    "build_threaded_view",
+    "is_local_seq_tid",
+    "resolve_root_comment",
+    "resolve_root_comment_tid",
 ]

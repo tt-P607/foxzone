@@ -23,8 +23,8 @@ _SERVICE_SIG = SERVICE_SIG
 class QZoneLikeTool(BaseTool):
     """为指定说说点赞的对外 Tool。"""
 
-    tool_name = "qzone_like_feed"
-    tool_description = (
+    name = "qzone_like_feed"
+    description = (
         "为指定 QQ 用户的某条说说点赞。"
         "需要先通过 qzone_read_feed 读取说说获得 tid，再用此工具点赞。"
         "适合外部 chatter 自己看完说说后决定点赞的场景。"

@@ -14,22 +14,14 @@ from src.app.plugin_system.base import BaseConfig, Field, SectionBase, config_se
 class FoxZoneConfig(BaseConfig):
     """墨狐空间插件配置。"""
 
-    config_name: ClassVar[str] = "config"
-    config_description: ClassVar[str] = "墨狐空间（QQ 空间说说自动化）插件配置"
+    name: ClassVar[str] = "config"
+    description: ClassVar[str] = "墨狐空间（QQ 空间说说自动化）插件配置"
 
     @config_section("general")
     class GeneralSection(SectionBase):
         """基础配置。"""
 
         enabled: bool = Field(default=True, description="是否启用插件")
-        bot_qq: str = Field(default="", description="Bot 的 QQ 号，用于监控和回复自己说说的评论")
-        expose_feed_write_tools: bool = Field(
-            default=True,
-            description=(
-                "是否向模型暴露写说说 Tool（qzone_start_compose_feed / qzone_submit_feed）。"
-                "关闭后仍保留 /send_feed 命令和底层服务能力。"
-            ),
-        )
 
     @config_section("llm")
     class LLMSection(SectionBase):
@@ -41,25 +33,12 @@ class FoxZoneConfig(BaseConfig):
             default="vlm",
             description="图片视觉识别的模型任务（为空则跳过识图）",
         )
-
-    @config_section("memory")
-    class MemorySection(SectionBase):
-        """记忆插件集成配置。
-
-        默认启用。开启后，FoxZone 会把 ``booku_memory`` 插件已暴露的所有
-        Tool 与 Agent 组件统一暴露给 LLM，由模型自主决定何时读写记忆。
-        ``booku_memory`` 究竟以轻量模式（``memory_read`` / ``memory_write``）
-        还是 Agent 模式工作，完全由其自身配置决定，FoxZone 不做约束。
-
-        前置条件不满足时（``booku_memory`` 未安装/未加载、未注册任何 Tool/Agent）
-        自动回退到普通纯文本调用，不影响主流程。
-        """
-
-        enable_memory_integration: bool = Field(
-            default=True,
+        multimodal_mode: bool = Field(
+            default=False,
             description=(
-                "是否将 booku_memory 暴露的所有 Tool/Agent 组件提供给 LLM。"
-                "关闭后写说说与评论决策不会调用记忆工具。"
+                "多模态模式。开启后，LLM 决策（评论回复 / 好友互动）时"
+                "把说说图片直接作为图像 payload 传给模型，不再先经 VLM 识图生成文本描述。"
+                "要求所用模型支持视觉输入。"
             ),
         )
 
@@ -70,13 +49,21 @@ class FoxZoneConfig(BaseConfig):
         enable_auto_monitor: bool = Field(default=True, description="是否启用自动监控好友动态")
         interval_minutes: int = Field(default=10, description="评论回复轮询间隔（分钟）")
         enable_auto_reply: bool = Field(default=True, description="是否自动回复自己说说下的评论")
+        enable_external_followup: bool = Field(
+            default=False,
+            description=(
+                "是否启用「外部空间评论回查」（检查 bot 在他人空间评论过的说说下是否有人回复）。"
+                "独立于 enable_auto_reply 控制。默认关闭——该功能会对每个互动过的 QQ 轮询，"
+                "互动对象多时请求量大、易触发 QZone 风控。"
+            ),
+        )
         max_comment_age_hours: float = Field(
             default=72.0,
             description="忽略超过此时间（小时）的旧评论，0 表示不限制",
         )
         enable_friend_monitor: bool = Field(
             default=False,
-            description="是否自动监控好友说说并由 QZoneChatter 决策互动（点赞/评论）",
+            description="是否自动监控好友说说并由 LLM 决策互动（点赞/评论）",
         )
         friend_monitor_interval_minutes: int = Field(
             default=30,
@@ -87,14 +74,15 @@ class FoxZoneConfig(BaseConfig):
             description="每次监控最多检查的好友说说数量",
         )
         external_followup_minutes: int = Field(
-            default=20,
+            default=60,
             description=(
                 "「外部空间评论回查」轮询间隔（分钟）。"
                 "用于检查 bot 在他人空间里评论过的说说下是否有人回复 bot。"
+                "仅 enable_external_followup=true 时生效。默认 60 分钟降低请求频率。"
             ),
         )
         external_followup_batch: int = Field(
-            default=2,
+            default=1,
             description=(
                 "外部空间回查每轮最多检查的 (qq, feed) 数量。"
                 "采用「最久未检测优先」轮转策略，避免单轮请求过多触发 QZone 限流。"
@@ -131,111 +119,38 @@ class FoxZoneConfig(BaseConfig):
 
     @config_section("cookie")
     class CookieSection(SectionBase):
-        """Cookie 获取配置（Napcat 备用 HTTP 接口）。"""
+        """Cookie 获取配置（经适配器 API 获取 QQ 空间 Cookie）。
 
-        http_fallback_host: str = Field(default="127.0.0.1", description="Napcat HTTP 服务地址")
-        http_fallback_port: int = Field(default=9999, description="Napcat HTTP 服务端口")
-        napcat_token: str = Field(default="", description="Napcat 认证 Token（可选）")
-
-    @config_section("ai_image")
-    class AiImageSection(SectionBase):
-        """AI 配图配置。"""
-
-        enable_ai_image: bool = Field(default=False, description="是否启用 AI 生成配图")
-        provider: str = Field(
-            default="siliconflow",
-            description="生图服务商，可选值：siliconflow / novelai / openai",
-        )
-
-    @config_section("siliconflow")
-    class SiliconFlowSection(SectionBase):
-        """硅基流动配图配置（provider = siliconflow 时生效）。"""
-
-        api_key: str = Field(default="", description="硅基流动 API 密钥")
-        model: str = Field(
-            default="black-forest-labs/FLUX.1-schnell",
-            description="绘图模型标识符",
-        )
-        image_number: int = Field(default=1, description="每次生成的图片数量（1-4 张）")
-
-    @config_section("novelai")
-    class NovelAISection(SectionBase):
-        """NovelAI 配图配置（provider = novelai 时生效）。"""
-
-        api_key: str = Field(default="", description="NovelAI 官方 API 密钥")
-        model: str = Field(
-            default="nai-diffusion-4-5-full",
-            description="绘图模型（nai-diffusion-4-5-full / nai-diffusion-4 / nai-diffusion-3）",
-        )
-        character_prompt: str = Field(
-            default="",
-            description=(
-                "画风锚点提示词（NovelAI tag 序列）。会在生图时自动注入到 prompt 头部以锁定整体画风，"
-                "如 'masterpiece, best quality, anime style, soft lighting, slice of life'。"
-                "角色外貌请由 LLM 根据人设文档自行推导，不要写在这里。"
-            ),
-        )
-        base_negative_prompt: str = Field(
-            default=(
-                "nsfw, nude, explicit, sexual content, lowres, bad anatomy, "
-                "bad hands, missing fingers, extra digit, fewer digits, cropped, "
-                "worst quality, low quality"
-            ),
-            description="基础负面提示词",
-        )
-        proxy_host: str = Field(default="", description="代理服务器地址（如 127.0.0.1）")
-        proxy_port: int = Field(default=0, description="代理服务器端口（如 7890）")
-
-    @config_section("openai")
-    class OpenAISection(SectionBase):
-        """OpenAI/兼容 chat-completion 接口生图配置（provider = openai 时生效）。
-
-        本插件复用项目统一的 ``config/model.toml``，不在此处保存 API Key/Base URL。
-        启用步骤：
-
-          1. 在 ``config/model.toml`` 中新建任务模型段，例如：
-
-             [model_tasks.foxzone_image]
-             model_list = ["gpt-image-2-2K"]
-             max_tokens = 1024
-             temperature = 0.7
-
-          2. 将下方 ``model_set`` 字段填为该段名（例如 ``"foxzone_image"``）。
-          3. 将 ``ai_image.provider`` 设为 ``"openai"``。
+        获取顺序：本地文件缓存 → 已启动适配器的 ``get_cookies`` action。
+        适配器统一透传 ``get_cookies``（各 QQ 适配器同命令名），
+        自动探测已启动的适配器，无需额外开启 HTTP 服务器。
         """
 
-        model_set: str = Field(
+        #: 适配器组件签名（格式 ``plugin:adapter:name``），留空则自动探测。
+        adapter_signature: str = Field(
             default="",
             description=(
-                "指向 config/model.toml 中 [model_tasks.<name>] 的任务名。"
-                "默认空，需先在 model.toml 创建任务模型段（如 [model_tasks.foxzone_image]），"
-                "然后将本字段填为该段名。空值时此 provider 不可用。"
+                "获取 Cookie 的适配器签名（plugin:adapter:name）。"
+                "留空自动探测已启动的 QQ 适配器。"
             ),
         )
-        reference_images: list[str] = Field(
-            default_factory=list,
-            description=(
-                "OpenAI 生图参考图列表（可选）。每项填本地图片路径，"
-                "如 'data/foxzone/reference/character.png'。"
-                "运行时会以多模态 image_url 形式附加在 user 消息中，"
-                "供模型参考画风/角色外貌。仅支持本地路径，HTTP URL 请先下载到本地。"
-            ),
+        #: 需要 Cookie 的域名，QZone 为固定值。
+        domain: str = Field(
+            default="user.qzone.qq.com",
+            description="需要 Cookie 的域名（QQ 空间固定为 user.qzone.qq.com）",
         )
-        reference_images_guidance: str = Field(
-            default="",
-            description=(
-                "参考图使用提示词（可选，默认空）。当 reference_images 至少有一张有效参考图时，"
-                "本字段的内容会被追加到 OpenAI 图像指引段末尾，告诉 LLM 如何使用这些参考图。"
-                "默认空（不附加任何提示）。"
-                "推荐填写示例："
-                "'附带的参考图用于锁定角色外貌（发色/瞳色/服饰等）与画风风格，"
-                "请参考它生成新场景，避免在 prompt 中重复描述参考图已有的特征。'"
-            ),
+        #: 请求超时秒数。
+        request_timeout: float = Field(default=15.0, description="获取 Cookie 的请求超时（秒）")
+        #: 适配器获取失败后的重试次数（不含首次尝试）。
+        retry_times: int = Field(default=3, description="获取 Cookie 失败后的重试次数（不含首次尝试）")
+        #: 首次重试等待秒数，此后逐次翻倍（如 3/6/9 递增）。
+        retry_base_delay: float = Field(
+            default=3.0, description="首次重试等待秒数，此后逐次递增（如 3/6/9 秒）"
         )
 
     @config_section("prompts")
     class PromptsSection(SectionBase):
-        """提示词模板配置（唯一真源）。
+        """提示词模板配置（唯一真源，共 4 个字段）。
 
         所有提示词文本均存放于本节。框架在首次加载或字段缺失时会按
         ``Field(default=...)`` 自动写回 ``config.toml``，用户后续修改不会被覆盖。
@@ -243,11 +158,8 @@ class FoxZoneConfig(BaseConfig):
 
         模板内变量占位符（PromptTemplate.build 阶段由调用方传入）：
           ``{personality_desc}`` / ``{current_time}`` / ``{weekday}`` /
-          ``{topic_desc}`` / ``{history}`` / ``{target_name}`` / ``{content}`` /
-          ``{rt_con_block}`` / ``{image_block}`` / ``{story_content}`` /
-          ``{story_time}`` / ``{comment_content}`` / ``{comment_time}`` /
-          ``{commenter_name}`` / ``{comments_block}`` / ``{comment_items_block}`` /
-          ``{feed_items_block}`` / ``{image_prompt_guide}`` / ``{output_format}``。
+          ``{topic_desc}`` / ``{history}`` / ``{comment_items_block}`` /
+          ``{feed_items_block}`` / ``{output_format}``。
 
         共用占位符：
           ``__GUIDELINES__`` 在注册到 PromptManager 前会被
@@ -265,9 +177,9 @@ class FoxZoneConfig(BaseConfig):
                 "6. 人设里反复出现的标签词是底色，不要让它们在评论里几乎每条都跳出来。"
             ),
             description=(
-                "评论统一规范（被 4 个评论类模板共用）。"
-                "在 comment_generate / comment_reply / comment_reply_batch / "
-                "friend_feed_interact 模板内通过 __GUIDELINES__ 占位符替换。"
+                "评论统一规范（被评论类模板共用）。"
+                "在 comment_reply_batch / friend_feed_interact 模板内"
+                "通过 __GUIDELINES__ 占位符替换。"
             ),
         )
         story_generate: str = Field(
@@ -284,14 +196,13 @@ class FoxZoneConfig(BaseConfig):
                 "6. **严禁重复**：下方提供最近发过的说说历史，必须创作全新的、"
                 "与历史记录内容和主题都不同的说说。\n"
                 "7. 不要刻意突出自身学科背景，不要浮夸，不要夸张修辞。\n\n"
-                "{image_prompt_guide}"
                 "**输出格式（JSON）：**\n"
                 "只输出一个合法 JSON，不含任何前缀、后缀或 Markdown 代码块。\n"
                 "{output_format}\n\n"
                 "---历史说说记录---\n"
                 "{history}"
             ),
-            description="模板 1：写说说正文（foxzone.story.generate）",
+            description="模板 1/3：写说说正文（foxzone.story.generate）",
         )
         comment_reply_batch: str = Field(
             default=(
@@ -315,7 +226,7 @@ class FoxZoneConfig(BaseConfig):
                 '[{{"comment_tid": "评论ID", "feed_id": "说说ID", "reply": "回复内容或 null"}}]'
             ),
             description=(
-                "模板 4：批量决策回复自己说说下的新评论"
+                "模板 2/3：批量决策回复自己说说下的新评论"
                 "（foxzone.comment.reply.batch）"
             ),
         )
@@ -358,7 +269,7 @@ class FoxZoneConfig(BaseConfig):
                 "</output_format>"
             ),
             description=(
-                "模板 5：好友说说接力评论决策（外部回查路径，"
+                "模板 3/3：好友说说接力评论决策（外部回查路径，"
                 "foxzone.friend.feed.interact）"
             ),
         )
@@ -366,12 +277,7 @@ class FoxZoneConfig(BaseConfig):
     # ---------- 字段声明（顺序与 Section 定义一致）----------
     general: GeneralSection = Field(default_factory=GeneralSection)
     llm: LLMSection = Field(default_factory=LLMSection)
-    memory: MemorySection = Field(default_factory=MemorySection)
     monitor: MonitorSection = Field(default_factory=MonitorSection)
     cookie: CookieSection = Field(default_factory=CookieSection)
-    ai_image: AiImageSection = Field(default_factory=AiImageSection)
-    siliconflow: SiliconFlowSection = Field(default_factory=SiliconFlowSection)
-    novelai: NovelAISection = Field(default_factory=NovelAISection)
-    openai: OpenAISection = Field(default_factory=OpenAISection)
     prompts: "PromptsSection" = Field(default_factory=lambda: FoxZoneConfig.PromptsSection())
 

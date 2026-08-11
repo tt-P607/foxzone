@@ -24,8 +24,8 @@ class SendFeedCommand(BaseCommand):
         ``/foxzone send 周末心情`` — 以"周末心情"为主题发说说
     """
 
-    command_name = "foxzone"
-    command_description = "FoxZone 管理命令，支持手动发布 QQ 空间说说"
+    name = "foxzone"
+    description = "FoxZone 管理命令，支持手动发布 QQ 空间说说"
     permission_level = PermissionLevel.OPERATOR
     command_prefix = "/"
 

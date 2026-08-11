@@ -29,7 +29,6 @@ SOURCE_BOTH = "both"
 # 互动类型
 ACTION_LIKE = "liked"
 ACTION_COMMENT = "commented"
-ACTION_VISITED = "visited"  # Agent 已处理（无论是否实际互动）
 
 
 def _make_key(target_qq: str, feed_id: str) -> str:
@@ -107,66 +106,6 @@ class InteractionLog:
         key = _make_key(target_qq, feed_id)
         entry = self._data.get(key, {})
         return bool(entry.get(ACTION_LIKE)) or bool(entry.get(ACTION_COMMENT))
-
-    def iter_commented(self, exclude_target_qq: str = "") -> list[tuple[str, str]]:
-        """枚举所有 bot 评论过的 (target_qq, feed_id)。
-
-        Args:
-            exclude_target_qq: 排除该 QQ 名下的说说（通常用于排除 bot 自己空间）
-
-        Returns:
-            (target_qq, feed_id) 元组列表
-        """
-        result: list[tuple[str, str]] = []
-        exclude = str(exclude_target_qq).strip()
-        for key, entry in self._data.items():
-            if not entry.get(ACTION_COMMENT):
-                continue
-            if ":" not in key:
-                continue
-            target_qq, _, feed_id = key.partition(":")
-            if not target_qq or not feed_id:
-                continue
-            if exclude and target_qq == exclude:
-                continue
-            result.append((target_qq, feed_id))
-        return result
-
-    def iter_commented_for_followup(
-        self, exclude_target_qq: str = "", limit: int = 0
-    ) -> list[tuple[str, str]]:
-        """按「最久未回查」优先返回 bot 评论过的 (target_qq, feed_id)。
-
-        用于外部空间评论回查的轮转调度：每轮只检查少量条目，
-        避免单次拉取过多说说触发 QZone 限流。
-
-        Args:
-            exclude_target_qq: 排除该 QQ 名下的说说（通常排除 bot 自己空间）
-            limit: 最多返回多少条；<= 0 表示不限制
-
-        Returns:
-            (target_qq, feed_id) 元组列表，按 last_followup_check 升序
-            （从未检查的视为 0，最优先）
-        """
-        items: list[tuple[float, str, str]] = []
-        exclude = str(exclude_target_qq).strip()
-        for key, entry in self._data.items():
-            if not entry.get(ACTION_COMMENT):
-                continue
-            if ":" not in key:
-                continue
-            target_qq, _, feed_id = key.partition(":")
-            if not target_qq or not feed_id:
-                continue
-            if exclude and target_qq == exclude:
-                continue
-            ts_raw = entry.get("last_followup_check", 0)
-            ts = float(ts_raw) if isinstance(ts_raw, (int, float)) else 0.0
-            items.append((ts, target_qq, feed_id))
-        items.sort(key=lambda x: x[0])
-        if limit and limit > 0:
-            items = items[:limit]
-        return [(qq, fid) for _, qq, fid in items]
 
     def iter_followup_qqs(
         self, exclude_target_qq: str = "", limit: int = 0,
@@ -278,20 +217,6 @@ class InteractionLog:
         entry["external_reply_count"] = new_count
         self._dirty = True
         return new_count
-
-    def has_visited(self, target_qq: str, feed_id: str) -> bool:
-        """是否已由 Agent 处理过该说说（无论是否实际互动）。
-
-        Args:
-            target_qq: 说说主人的 QQ 号
-            feed_id: 说说 tid
-
-        Returns:
-            True 表示 Agent 已处理，不应再次触发
-        """
-        key = _make_key(target_qq, feed_id)
-        entry = self._data.get(key, {})
-        return bool(entry.get(ACTION_VISITED)) or bool(entry.get(ACTION_LIKE)) or bool(entry.get(ACTION_COMMENT))
 
     # ------------------------------------------------------------------
     # 写入接口

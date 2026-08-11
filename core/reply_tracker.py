@@ -70,17 +70,6 @@ class ReplyTrackerService:
         """
         return comment_id in self._data["data"].get(feed_id, {})
 
-    def get_replied_comments(self, feed_id: str) -> set[str]:
-        """获取指定说说下所有已回复的评论 ID 集合。
-
-        Args:
-            feed_id: 说说 ID
-
-        Returns:
-            已回复评论 ID 的集合（如果无记录则返回空集合）
-        """
-        return set(self._data["data"].get(feed_id, {}).keys())
-
     # ------------------------------------------------------------------
     # 写入接口
     # ------------------------------------------------------------------
@@ -98,36 +87,6 @@ class ReplyTrackerService:
         self._data["data"][feed_id][comment_id] = time.time()
         await self._persist()
         logger.debug(f"已标记评论 {comment_id}（说说 {feed_id}）为已回复。")
-
-    async def remove_reply_record(self, feed_id: str, comment_id: str) -> None:
-        """删除指定评论的回复记录。
-
-        若记录不存在，则静默忽略（幂等操作）。
-
-        Args:
-            feed_id: 说说 ID
-            comment_id: 评论 ID
-        """
-        feed_records = self._data["data"].get(feed_id)
-        if feed_records and comment_id in feed_records:
-            del feed_records[comment_id]
-            # 若该说说下已无记录，则清理空字典
-            if not feed_records:
-                del self._data["data"][feed_id]
-            await self._persist()
-            logger.debug(f"已删除评论 {comment_id}（说说 {feed_id}）的回复记录。")
-
-    async def clear_feed_records(self, feed_id: str) -> None:
-        """清除指定说说下的所有回复记录。
-
-        Args:
-            feed_id: 说说 ID
-        """
-        if feed_id in self._data["data"]:
-            count = len(self._data["data"][feed_id])
-            del self._data["data"][feed_id]
-            await self._persist()
-            logger.info(f"已清除说说 {feed_id} 下的 {count} 条回复记录。")
 
     # ------------------------------------------------------------------
     # 私有辅助方法

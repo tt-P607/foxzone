@@ -1,5 +1,102 @@
 # FoxZone 开发日志
 
+## 2026-08 减负与适配器化
+
+### Cookie 获取改走适配器
+
+- `core/cookie.py`：删除 Napcat HTTP 端点逻辑，改为经已启动适配器透传 `get_cookies` action（OneBot / SnowLuma 同命令名）
+- 新增 `parse_cookie_string()` 纯函数；`adapter_signature` 留空自动探测（优先 snowluma → onebot），或显式指定
+- `config.py [cookie]`：移除 `http_fallback_host` / `http_fallback_port` / `napcat_token`，新增 `adapter_signature` / `domain` / `request_timeout`
+- `manifest.json` 新增 `adapter_api` 声明；`README.md` / `QZONE_API.md` Cookie 章节同步
+
+### 删除生图模块（大幅减负）
+
+- 删除 `core/image/`（dispatcher / novelai / siliconflow / openai / provider 共约 1150 行）
+- 删除 `qzone_start_compose_feed` / `qzone_submit_feed` 两个 Tool 与 `FEED_GUIDANCE_TEMPLATE`、三个 `IMAGE_GUIDANCE_*`
+- `components/service.py`：移除 `publish_feed_with_image_info` / `compose_feed_guidance` / `_build_generated_feed` / `_generate_image_from_info` / `_load_image_bytes`；`publish_generated_feed` 简化为纯文本生成
+- `core/llm/generators.py`：移除 `generate_story_with_image_info`；`core/llm/parsers.py`：移除 `parse_story_with_image_json`
+- `config.py` / `config.toml`：移除 `[ai_image]` / `[siliconflow]` / `[novelai]` / `[openai]` 与 `general.expose_feed_write_tools`
+- `manifest.json` 移除两个 Tool 的 include 声明
+- 底部 `publish()` 仍保留 `images` 参数（底层带图能力不变，仅上层不再自动生图）
+
+### 删除记忆集成（去耦合）
+
+- 删除 `core/llm/memory_tools.py` 与 `MemorySection` / `enable_memory_integration` 配置
+- `core/llm/generators.py`：移除 `_send_prompt_with_memory_tools`，三个 LLM 入口改回 `_send_prompt`
+- 同步清理 `README.md` / `config.toml` 记忆相关段落
+
+### 外部回查独立开关（防风控）
+
+- 新增 `monitor.enable_external_followup`（默认 `false`），把外部空间评论回查从 `enable_auto_reply` 中剥离独立控制
+- `autopilot/scheduler.py`：外部回查改为独立开关驱动；开启时默认降频（间隔 60 分钟、每轮 1 个 QQ）
+- 越层导入清理：`personality.py` 改用 `config_api.get_core_config()`；`manifest.json` 移除无用 `media_api` 与 `Pillow` 依赖
+
+### 消除 bot_qq 配置冗余
+
+- 删除 `general.bot_qq` 配置字段（core.toml 不含 bot QQ 号，其真源在适配器配置）
+- `runtime.bot_qq()` 改为异步，经 `adapter_api.get_bot_info_by_platform("qq")` 从已启动的 QQ 适配器动态获取并缓存；全部 7 处调用点同步
+
+### 多模态模式
+
+- 新增 `llm.multimodal_mode`（默认 `false`）：开启后，评论回复 / 好友互动决策时把说说图片直接作为图像 payload 传给模型，不再先经 VLM 识图生成文本描述
+- `core/llm/vision.py`：新增 `download_images()`（URL → base64 data）
+- `core/llm/generators.py`：`_send_prompt` 支持 `images` 参数；`generate_batch_replies` / `generate_feed_decisions` 按开关分流
+- `autopilot/friend_feeds.py`：多模态模式下跳过 `fill_image_text`
+
+### 修复轮询启动过早（适配器未就绪时误跑）
+
+- `autopilot/scheduler.py`：三条循环首次执行前先等待 QQ 适配器启动就绪（`_wait_for_adapters`，最长 60s），避免适配器尚未就绪时白跑一次并误报 Cookie 失败
+- `autopilot/scheduler.py`：Bot QQ 号改为每次轮询时动态获取（`_once_with_bot_qq`），不再启动阶段预取，避免适配器未就绪时取到空串并长期失效
+- `runtime.py`：`bot_qq()` 仅在取回非空 QQ 号时缓存，失败不缓存空串，便于后续重试
+- `core/cookie.py`：新增 `has_adapter()` 供就绪判定；日志泛化，不再出现具体适配器名，统一「通过适配器获取 Cookie」，并明确打印成功 / 失败结果
+- `runtime.py` / `config.py` / `config.toml` / `README.md`：同步泛化适配器描述文案
+
+### Cookie 获取退避重试（解决适配器 WS 未就绪）
+
+- 根因：适配器虽已启动并进入活跃列表，但 WebSocket 长连接可能尚未建立，`get_cookies` 透传会抛「WebSocket 连接未建立」
+- `core/cookie.py`：`_get_from_adapter` 增加退避重试，默认首次尝试 + 重试 3 次，等待 3/6/9 秒递增；每次重试前重新探测已启动适配器
+- `config.py [cookie]`：新增 `retry_times`（默认 3）、`retry_base_delay`（默认 3.0），`config.toml` 同步
+- 空 QQ 号时不再读写本地文件缓存，避免生成 `cookies-.json`
+
+### 补测试
+
+- 新建 `test/plugins/foxzone/test_cookie_service.py`（13 个用例：解析 / 缓存 / 适配器多源回退 / 签名解析 / 失效清理）
+- 新建 `test/plugins/foxzone/test_scheduler.py`（5 个用例：外部回查独立开关 / 默认关 / 停启）
+- 新建 `test/plugins/foxzone/test_vision.py`（4 个用例：图片下载 / 失败跳过）
+
+## 2026-07 v3.0 完全重构（自治闭环架构）
+
+### 背景
+
+插件内并存两套架构：`REFACTOR_DESIGN.md`（v2.0）设计的 Adapter→Envelope→Chatter 链路自 2026-03 迁移后已 100% 死代码，与 `service.process_*_batch` 闭环逐行重复且开始漂移；`QZoneService` 1301 行承担 7 类职责；框架 `ServiceManager.get_service()` 非单例导致持久化状态重复读盘、`InteractionLog` 并发写覆盖；模块级 `_REPLY_SEND_LOCK` 缺 `try/finally` 存在锁泄漏。详细审查与设计见仓库根 `plans/refactor_foxzone.md`。
+
+### 变更
+
+**新架构四层**：`components/`（对外契约）→ `runtime.py`（状态单例）→ `autopilot/`（自治闭环）→ `core/`（纯能力）。
+
+- 新增 `runtime.py`：`QZoneRuntime` 插件级单例，统一持有 cookie / reply_tracker / interaction_log / vision_cache / image_dispatcher / content / 发送串行锁；`_with_client` Cookie 重试迁入
+- 新增 `autopilot/`：`Autopilot` 调度器（DND + 三条循环，脱离 `BaseAdapter`）+ `BatchSendEngine`（抖动/重试/限流分类，`async with` 持锁修复锁泄漏）+ 三条流程模块
+- `core/api_client.py`(1090行) 拆分为 `core/http/`（client/feeds/comments/publish，mixin 组合，对外仍是单一 `QZoneAPIClient`）
+- `core/content.py`(1180行) 拆分为 `core/llm/`（personality/formatters/parsers/memory_tools/vision/generators）
+- 新增 `core/comment_tree.py`：合并 service 与 content 两份评论树溯源实现
+- `components/service.py` 瘦身为原子门面（1301→约 470 行），批量编排全部迁出
+- 两套识图实现（service 自建 aiohttp 版 / content media_api 版）统一为 `core/llm/vision.py`（保留 vision_cache 持久化缓存）
+- `ContentService` 改为持有 runtime，消除 `get_service()` 反查循环依赖
+
+**删除**：`components/chatter.py`（368 行死代码）、`components/adapter.py`（envelope 链路死代码，调度部分迁入 autopilot）、`REFACTOR_DESIGN.md`（被 plans/refactor_foxzone.md 取代）、`IMAGE_SCENE_DESC_TEMPLATE` 与 `foxzone.image.scene_desc` 模板、全部无调用者方法（`has_visited`/`mark_visited`/`has_liked`/`has_commented`/`iter_commented*`/`get_replied_comments`/`remove_reply_record`/`clear_feed_records` 等）、`dist/` 构建产物
+
+**修复**：
+- 发送锁泄漏（模块级锁 + 手动 acquire/release → runtime 实例锁 + `async with`）
+- `InteractionLog` 并发写覆盖 race（状态单例化后从根上消除）
+- `plugin.py` 无效预热（旧实例初始化后即被丢弃 → runtime 真正全程复用）
+- 3 处 `getattr` 滥用改为直接属性访问
+- `_COMMENT_URL`/`_REPLY_URL` 重复常量与错误注释（两接口本就同端点）
+- 越层导入（`ToolRegistry` 改经 `llm_api.create_tool_registry`；`ComponentType` 改经 `plugin_system.types`）
+
+**行为变化**：
+- 好友监控评论路径的限流处理与外部接力路径统一由 `BatchPolicy.stop_batch_on_rate_limit` 区分（前者终止整批、后者单条跳过），语义与旧实现一致
+- `qzone` 平台注册随 Adapter 删除而消失（原唯一消费者是死代码 Chatter）；若将来需要让其他插件感知 QZone 事件，应经 `event_api` 发布自定义事件
+
 ## 2026-05 booku_memory 组件集成（单一开关版）
 
 ### 背景
