@@ -29,6 +29,7 @@ SOURCE_BOTH = "both"
 # 互动类型
 ACTION_LIKE = "liked"
 ACTION_COMMENT = "commented"
+ACTION_READ = "read"
 
 
 def _make_key(target_qq: str, feed_id: str) -> str:
@@ -106,6 +107,25 @@ class InteractionLog:
         key = _make_key(target_qq, feed_id)
         entry = self._data.get(key, {})
         return bool(entry.get(ACTION_LIKE)) or bool(entry.get(ACTION_COMMENT))
+
+    def has_seen(self, target_qq: str, feed_id: str) -> bool:
+        """是否已处理过该说说（点赞、评论或仅读）。
+
+        好友监控关闭强制点赞时，未点赞但已读取的说说通过
+        ``ACTION_READ`` 记录，避免下轮被重复读取。
+
+        Args:
+            target_qq: 说说主人的 QQ 号
+            feed_id: 说说 tid
+
+        Returns:
+            True 表示已处理过（点赞 / 评论 / 仅读任一）
+        """
+        key = _make_key(target_qq, feed_id)
+        entry = self._data.get(key, {})
+        return bool(entry.get(ACTION_LIKE)) or bool(entry.get(ACTION_COMMENT)) or bool(
+            entry.get(ACTION_READ)
+        )
 
     def iter_followup_qqs(
         self, exclude_target_qq: str = "", limit: int = 0,

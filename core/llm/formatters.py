@@ -100,6 +100,7 @@ def format_feed_items_block(feed_items: list[dict[str, Any]]) -> str:
         block = (
             f"=== 说说 {i}/{total} ===\n"
             f"好友 QQ：{target_qq}  发布时间：{created_time}\n"
+            f"状态：尚未点赞\n"
             f"正文：「{content[:200]}{'…' if len(content) > 200 else ''}」\n"
         )
         if image_text:

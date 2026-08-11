@@ -308,15 +308,16 @@ class ContentService:
         self,
         feed_items: list[dict[str, Any]],
     ) -> list[dict[str, Any]]:
-        """批量生成好友说说评论决策（点赞已由调度层完成，仅决策评论）。
+        """批量生成好友说说互动决策（点赞 + 评论）。
 
         Args:
             feed_items: 说说项列表，每项需含 tid, target_qq, content,
                         created_time, image_text, comment_count 字段
 
         Returns:
-            决策列表，每项为 ``{"tid": str, "target_qq": str, "comment": str | None}``。
-            ``comment`` 为 None 表示仅点赞、不写评论。
+            决策列表，每项为 ``{"tid": str, "target_qq": str,
+            "like": bool, "comment": str | None}``。
+            ``like`` 表示是否点赞；``comment`` 为 None 表示不写评论。
         """
         if not feed_items:
             return []

@@ -187,7 +187,8 @@ def parse_feed_decisions(response: str) -> list[dict[str, Any]]:
         response: LLM 原始响应文本
 
     Returns:
-        决策列表，每项保证含 tid、target_qq、comment 字段。
+        决策列表，每项保证含 tid、target_qq、like、comment 字段；
+        ``like`` 缺失时视为 False（默认不点赞）。
     """
     raw = strip_markdown_fence(response)
     try:
@@ -205,13 +206,17 @@ def parse_feed_decisions(response: str) -> list[dict[str, Any]]:
             target_qq = str(item.get("target_qq", "")).strip()
             if not (tid and target_qq):
                 continue
+            like_raw = item.get("like")
+            like: bool = bool(like_raw) if like_raw is not None else False
             comment_raw = item.get("comment")
             comment: str | None = None
             if comment_raw is not None:
                 comment = clean_reply(str(comment_raw))
                 if not comment:
                     comment = None
-            result.append({"tid": tid, "target_qq": target_qq, "comment": comment})
+            result.append(
+                {"tid": tid, "target_qq": target_qq, "like": like, "comment": comment}
+            )
 
         return result
     except Exception as exc:

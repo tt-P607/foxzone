@@ -65,6 +65,14 @@ class FoxZoneConfig(BaseConfig):
             default=False,
             description="是否自动监控好友说说并由 LLM 决策互动（点赞/评论）",
         )
+        always_like: bool = Field(
+            default=False,
+            description=(
+                "好友说说监控是否始终点赞。为 true 时无条件先点赞再决策评论；"
+                "为 false 时不再强制点赞，由 LLM 对每条说说自主决定是否点赞与评论，"
+                "未点赞的说说会记录为已读避免重复读取。"
+            ),
+        )
         friend_monitor_interval_minutes: int = Field(
             default=30,
             description="好友说说监控轮询间隔（分钟）",
@@ -235,15 +243,22 @@ class FoxZoneConfig(BaseConfig):
                 "{personality_desc}\n\n"
                 "当前时间：{current_time}\n\n"
                 "<task>\n"
-                "以下是好友们最近发布的说说，**所有这些说说均已自动点赞**。\n"
-                "你只需要逐条判断是否额外写一条评论。\n"
+                "以下是好友们最近发布的说说，请对每条独立判断「是否点赞」"
+                "与「是否评论」。点赞与评论是两个独立的动作，互不绑定，"
+                "也都不是必须——可以不点赞、可以只点赞不评论、可以两者都做，"
+                "甚至只浏览不表态，都是正常选择。\n"
                 "</task>\n\n"
                 "{feed_items_block}\n\n"
                 "<context>\n"
                 "QQ 空间不是聊天框，是好友间留言式的轻互动场景。\n"
-                "点赞已经表态；评论是另一个独立动作，写或不写都属于正常选择。\n"
+                "点赞通常表示已读与认同；如果你觉得内容不合适，也可以不点赞、仅阅读。\n"
+                "评论是你顺手留下的一句感想，写或不写都属于正常选择。\n"
                 "</context>\n\n"
                 "<decision_principles>\n"
+                "# 点赞\n"
+                "- 点赞代表已读 + 认同；对没共鸣、不认同或内容不合适的内容，可以选择不点赞；\n"
+                "- 不点赞也没有关系，未点赞的说说仍会被记录为已读，不会反复提醒你。\n"
+                "\n"
                 "# 评论不是聊天\n"
                 "- 评论是你顺手留下的一句感想，不是对话开头；\n"
                 "- 不要 @ 说说作者，不要以“你”开头问候；\n"
@@ -264,13 +279,13 @@ class FoxZoneConfig(BaseConfig):
                 "__GUIDELINES__\n\n"
                 "<output_format>\n"
                 "只输出合法 JSON 数组，不含任何前缀、后缀或 Markdown 代码块。\n"
-                "comment=null 表示仅点赞、不评论；非 null 则填写评论正文。\n"
-                '[{{"tid": "说说ID", "target_qq": "QQ号", "comment": "评论内容或 null"}}]\n'
+                "like=true 表示点赞、false 表示不点赞；comment=null 表示不评论，"
+                "非 null 则填写评论正文。\n"
+                '[{{"tid": "说说ID", "target_qq": "QQ号", "like": true或false, "comment": "评论内容或 null"}}]\n'
                 "</output_format>"
             ),
             description=(
-                "模板 3/3：好友说说接力评论决策（外部回查路径，"
-                "foxzone.friend.feed.interact）"
+                "模板 3/3：好友说说互动决策（点赞 + 评论，foxzone.friend.feed.interact）"
             ),
         )
 
