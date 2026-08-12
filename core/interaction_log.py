@@ -113,6 +113,9 @@ class InteractionLog:
 
         好友监控关闭强制点赞时，未点赞但已读取的说说通过
         ``ACTION_READ`` 记录，避免下轮被重复读取。
+        已有互动（点赞或评论）但缺少 ``read`` 标记的旧记录，
+        会在本次判定时自动补全 ``read`` 字段并标记 dirty，由后续
+        ``save`` 统一落盘。
 
         Args:
             target_qq: 说说主人的 QQ 号
@@ -123,9 +126,13 @@ class InteractionLog:
         """
         key = _make_key(target_qq, feed_id)
         entry = self._data.get(key, {})
-        return bool(entry.get(ACTION_LIKE)) or bool(entry.get(ACTION_COMMENT)) or bool(
+        seen = bool(entry.get(ACTION_LIKE)) or bool(entry.get(ACTION_COMMENT)) or bool(
             entry.get(ACTION_READ)
         )
+        if seen and not entry.get(ACTION_READ):
+            entry[ACTION_READ] = True
+            self._dirty = True
+        return seen
 
     def iter_followup_qqs(
         self, exclude_target_qq: str = "", limit: int = 0,
