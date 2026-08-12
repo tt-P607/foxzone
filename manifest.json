@@ -10,7 +10,7 @@
     "storage_api": "1.0.0"
   },
   "display_name": "墨狐空间",
-  "version": "2.0.3",
+  "version": "2.0.2",
   "description": "墨狐空间：将 Bot 连接到 QQ 空间，实现说说自动发送、好友动态监控与评论互动",
   "author": "言柒",
   "license": "AGPL-v3.0",
