@@ -1,64 +1,71 @@
 {
-    "name": "foxzone",
-    "api_version": {"adapter_api": "1.0.0", "config_api": "1.0.0", "llm_api": "1.0.0", "log_api": "1.0.0", "prompt_api": "1.0.0", "service_api": "1.0.0", "storage_api": "1.0.0"},
-
-    "display_name": "墨狐空间",
-    "version": "2.0.0",
-    "description": "墨狐空间：将 Bot 连接到 QQ 空间，实现说说自动发送、好友动态监控与评论互动",
-    "author": "言柒",
-    "license": "AGPL-v3.0",
-    "categories": [
-        "chat"
-    ],
-    "tags": [
-        "qzone",
-        "feed",
-        "comment",
-        "qq"
-    ],
-    "dependencies": {
-        "plugins": [],
-        "components": []
+  "name": "foxzone",
+  "api_version": {
+    "adapter_api": "1.0.0",
+    "config_api": "1.0.0",
+    "llm_api": "1.0.0",
+    "log_api": "1.0.0",
+    "prompt_api": "1.0.0",
+    "service_api": "1.0.0",
+    "storage_api": "1.0.0"
+  },
+  "display_name": "墨狐空间",
+  "version": "2.0.1",
+  "description": "墨狐空间：将 Bot 连接到 QQ 空间，实现说说自动发送、好友动态监控与评论互动",
+  "author": "言柒",
+  "license": "AGPL-v3.0",
+  "categories": [
+    "chat"
+  ],
+  "tags": [
+    "qzone",
+    "feed",
+    "comment",
+    "qq"
+  ],
+  "dependencies": {
+    "plugins": [],
+    "components": []
+  },
+  "include": [
+    {
+      "component_type": "tool",
+      "component_name": "qzone_read_feed",
+      "dependencies": []
     },
-    "include": [
-        {
-            "component_type": "tool",
-            "component_name": "qzone_read_feed",
-            "dependencies": []
-        },
-        {
-            "component_type": "tool",
-            "component_name": "qzone_post_comment",
-            "dependencies": []
-        },
-        {
-            "component_type": "tool",
-            "component_name": "qzone_like_feed",
-            "dependencies": []
-        },
-        {
-            "component_type": "command",
-            "component_name": "foxzone",
-            "dependencies": []
-        },
-        {
-            "component_type": "service",
-            "component_name": "qzone_service",
-            "dependencies": []
-        },
-        {
-            "component_type": "config",
-            "component_name": "config",
-            "dependencies": []
-        }
-    ],
-    "python_dependencies": [
-        "aiohttp>=3.9",
-        "beautifulsoup4>=4.12",
-        "json5>=0.9",
-        "orjson>=3.9"
-    ],
-    "entry_point": "plugin.py",
-    "min_core_version": "1.0.0",
-    "dependencies_required": true
+    {
+      "component_type": "tool",
+      "component_name": "qzone_post_comment",
+      "dependencies": []
+    },
+    {
+      "component_type": "tool",
+      "component_name": "qzone_like_feed",
+      "dependencies": []
+    },
+    {
+      "component_type": "command",
+      "component_name": "foxzone",
+      "dependencies": []
+    },
+    {
+      "component_type": "service",
+      "component_name": "qzone_service",
+      "dependencies": []
+    },
+    {
+      "component_type": "config",
+      "component_name": "config",
+      "dependencies": []
+    }
+  ],
+  "python_dependencies": [
+    "aiohttp>=3.9",
+    "beautifulsoup4>=4.12",
+    "json5>=0.9",
+    "orjson>=3.9"
+  ],
+  "entry_point": "plugin.py",
+  "min_core_version": "1.0.0",
+  "dependencies_required": true
 }

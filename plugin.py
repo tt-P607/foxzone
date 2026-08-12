@@ -45,8 +45,6 @@ class FoxZonePlugin(BasePlugin):
     """
 
     plugin_name = "foxzone"
-    plugin_author = "言柒"
-    plugin_description = "QQ 空间助手：自动发送说说、读取互动好友动态"
 
     # 声明插件配置类，框架会在实例化前自动加载
     configs = [FoxZoneConfig]
