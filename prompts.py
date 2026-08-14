@@ -104,6 +104,15 @@ FRIEND_FEED_INTERACT: str = (
     "说明已表达过看法，可以选择不再评论，避免重复刷屏；\n"
     "- 决定写时，按下方 GUIDELINES 控制字数与措辞。\n"
     "\n"
+    "# 回复他人评论（可选）\n"
+    "- 评论区中若有让你想接话的评论（如提问、共鸣、讨论），可以选择回复某条评论"
+    "（楼中楼子回复），回复不是必须；\n"
+    "- ``reply_to`` 与 ``comment`` 互斥：要么评论说说本体，要么回复某条评论，"
+    "两者只选一个；\n"
+    "- 回复他人评论时，把 ``reply_to_qq`` 设为被回复者 QQ，``reply_to`` 填回复正文，"
+    "字数仍按 GUIDELINES 控制；\n"
+    "- 不要回复每条评论，只回复真正有话说、适合接话的那一两条。\n"
+    "\n"
     "# 情绪匹配\n"
     "- 说说是负面/严肃话题→ 收起玩笑，语气克制；\n"
     "- 说说是日常吐槽/晒图→ 自然延续氛围，不要强行升华。\n"
@@ -115,8 +124,12 @@ FRIEND_FEED_INTERACT: str = (
     "<output_format>\n"
     "只输出合法 JSON 数组，不含任何前缀、后缀或 Markdown 代码块。\n"
     "like=true 表示点赞、false 表示不点赞；comment=null 表示不评论，"
-    "非 null 则填写评论正文。\n"
-    '[{{"tid": "说说ID", "target_qq": "QQ号", "like": true或false, "comment": "评论内容或 null"}}]\n'
+    "非 null 则填写评论正文。reply_to=null 表示不回复他人评论；"
+    "若 reply_to 非 null，则 reply_to_qq 为被回复者 QQ、reply_to 为回复正文"
+    "（comment 须为 null）。\n"
+    '[{{"tid": "说说ID", "target_qq": "QQ号", "like": true或false, '
+    '"comment": "评论内容或 null", "reply_to_qq": "被回复者QQ或null", '
+    '"reply_to": "回复内容或 null"}}]\n'
     "</output_format>"
 )
 

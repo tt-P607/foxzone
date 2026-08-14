@@ -105,7 +105,7 @@ def format_feed_items_block(
         content = str(item.get("content", "（无正文）")).strip()
         created_time = format_story_time(item.get("created_time")) or "未知时间"
         image_text = item.get("image_text", "")
-        comment_count = int(item.get("comment_count", 0))
+        comments = item.get("comments", []) or []
 
         block = (
             f"=== 说说 {i}/{total} ===\n"
@@ -119,8 +119,20 @@ def format_feed_items_block(
                 block += f"[[IMG:{i}:{j}]]\n"
         elif image_text:
             block += f"{image_text}\n"
-        if comment_count:
-            block += f"当前评论数：{comment_count}\n"
+        # 展示评论区（供 LLM 判断是否回复某条评论）
+        if comments:
+            block += f"评论区（{len(comments)} 条）：\n"
+            for c in comments:
+                nickname = str(c.get("nickname", "") or "").strip() or "匿名"
+                qq = str(c.get("qq_account", "") or "").strip()
+                ctext = str(c.get("content", "") or "").strip()
+                ctid = str(c.get("comment_tid", "") or "").strip()
+                block += f"  · {nickname}"
+                if qq:
+                    block += f"(qq={qq})"
+                if ctid:
+                    block += f" [cid={ctid}]"
+                block += f"：{ctext[:120]}{'…' if len(ctext) > 120 else ''}\n"
         block += f"[meta] tid={tid}  target_qq={target_qq}"
         blocks.append(block)
 

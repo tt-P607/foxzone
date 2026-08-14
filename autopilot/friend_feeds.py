@@ -126,8 +126,16 @@ async def friend_monitor_once(runtime: "QZoneRuntime", num_feeds: int) -> None:
 
 
 def _to_feed_item(feed: dict[str, Any]) -> dict[str, Any]:
-    """将动态流中的单条说说转换为 LLM 决策输入项。"""
-    target_qq = str(feed.get("target_qq", "")).strip()
+    """将动态流中的单条说说转换为 LLM 决策输入项。
+
+    ``target_qq`` 兼容两种数据源：好友动态流（feeds3_html_more，带
+    ``target_qq``）与说说列表（msglist_v6，无该字段，退回取 ``uin``）。
+    """
+    target_qq = (
+        str(feed.get("target_qq", "")).strip()
+        or str(feed.get("uin", "")).strip()
+        or str(feed.get("host_uin", "")).strip()
+    )
     tid = str(feed.get("tid", "")).strip()
     content_text = str(feed.get("content") or feed.get("rt_con") or "（无正文）").strip()
     created_time = str(feed.get("created_time", "")).strip()
@@ -143,6 +151,7 @@ def _to_feed_item(feed: dict[str, Any]) -> dict[str, Any]:
         "created_time": created_time,
         "image_text": "\n".join(image_lines),
         "images": images,
+        "comments": comments,
         "comment_count": len(comments),
     }
 
@@ -151,12 +160,14 @@ async def process_feed_monitor_batch(
     runtime: "QZoneRuntime",
     feed_items: list[dict[str, Any]],
 ) -> dict[str, Any]:
-    """处理「好友说说监控」批次：图片识别 + 决策 + 点赞/评论 + 标记。
+    """处理「好友说说监控」批次：图片识别 + 决策 + 点赞/评论/回复 + 标记。
 
-    按 LLM 决策逐条执行点赞与评论，并记录互动状态：
+    按 LLM 决策逐条执行点赞、评论说说本体与回复他人评论，并记录互动状态：
     - 点赞（like=True）→ 标记 ACTION_LIKE
     - 评论（comment 非空）→ 标记 ACTION_COMMENT
-    - 两者都不做 → 标记 ACTION_READ（已读，避免下轮重复读取）
+    - 回复他人评论（reply_to 非空）→ 精准拉取详情定位评论后 reply，
+      标记 ACTION_COMMENT（使该 feed 进入外部回查）+ reply_tracker 防重复
+    - 三者都不做 → 标记 ACTION_READ（已读，避免下轮重复读取）
 
     Args:
         runtime: 插件运行时
@@ -164,10 +175,11 @@ async def process_feed_monitor_batch(
             自主模式下为全部候选）
 
     Returns:
-        ``{"liked": int, "commented": int, "decisions": dict[str, dict]}``
+        ``{"liked": int, "commented": int, "replied": int,
+        "decisions": dict[str, dict]}``
     """
     if not feed_items:
-        return {"liked": 0, "commented": 0, "decisions": {}}
+        return {"liked": 0, "commented": 0, "replied": 0, "decisions": {}}
 
     cfg = runtime.config
 
@@ -186,7 +198,7 @@ async def process_feed_monitor_batch(
         feed_decisions = await runtime.content.generate_feed_decisions(feed_items)
     except Exception as exc:
         logger.error(f"批量生成好友说说互动决策时发生异常: {exc}")
-        return {"liked": 0, "commented": 0, "decisions": {}}
+        return {"liked": 0, "commented": 0, "replied": 0, "decisions": {}}
 
     decision_map: dict[str, dict[str, Any]] = {
         d["tid"]: d for d in feed_decisions if d.get("tid")
@@ -290,6 +302,85 @@ async def process_feed_monitor_batch(
         on_success=_on_success,
     )
 
+    # ── 按决策回复他人评论（reply_to，楼中楼子回复）──
+    # 监控流的 HTML 评论不含顶层父级信息，回复前必须先 fetch_feed_detail
+    # 精准拉取完整评论树，用 reply_to_qq 定位目标评论，取其 parent_tid
+    # （即顶层一级评论 tid）作为 commentId 提交 reply。
+    replied_count = 0
+    for item in feed_items:
+        tid = str(item.get("tid", ""))
+        target_qq = str(item.get("target_qq", ""))
+        decision = decision_map.get(tid) or {}
+        reply_text = str(decision.get("reply_to") or "").strip()
+        reply_qq = str(decision.get("reply_to_qq") or "").strip()
+        if not (tid and target_qq and reply_text and reply_qq):
+            continue
+
+        try:
+            detail = await runtime.with_client(
+                lambda client, qq=target_qq, t=tid: client.fetch_feed_detail(
+                    host_qq=str(qq), tid=str(t)
+                )
+            )
+        except Exception as exc:
+            logger.warning(f"好友说说：拉取详情失败，跳过回复评论 (qq={target_qq} tid={tid}): {exc}")
+            continue
+
+        all_comments: list[dict[str, Any]] = list(
+            (detail or {}).get("comments", []) or []
+        )
+        # 定位目标评论（按 qq_account 匹配，取第一条）
+        target_comment: dict[str, Any] | None = None
+        for c in all_comments:
+            if str(c.get("qq_account", "") or "") == reply_qq:
+                target_comment = c
+                break
+        if target_comment is None:
+            logger.warning(
+                f"好友说说：未找到评论者 {reply_qq} 的评论，跳过回复 (tid={tid})"
+            )
+            continue
+
+        comment_tid = str(target_comment.get("comment_tid", "") or "")
+        parent_tid = str(target_comment.get("parent_tid", "") or "")
+        root_tid = parent_tid or comment_tid  # 顶层一级评论 tid 作 commentId
+        target_name = str(target_comment.get("nickname", "") or "未知用户")
+        if not (comment_tid and root_tid):
+            logger.warning(f"好友说说：目标评论缺少 tid，跳过回复 (tid={tid})")
+            continue
+
+        try:
+            ok = await runtime.with_client(
+                lambda client: client.reply(
+                    tid,
+                    target_qq,
+                    target_name,
+                    reply_text,
+                    root_tid,
+                    reply_qq,
+                )
+            )
+        except Exception as exc:
+            logger.error(f"好友说说：回复评论异常 (qq={target_qq} tid={tid}): {exc}")
+            continue
+        if not ok:
+            logger.warning(
+                f"好友说说：回复评论失败 (qq={target_qq} tid={tid} "
+                f"reply_to={reply_qq})"
+            )
+            continue
+
+        # 标记互动（comment 使该 feed 进入外部回查）+ 回复跟踪防重复
+        runtime.interaction_log.mark(target_qq, tid, ACTION_COMMENT, SOURCE_POLL)
+        await runtime.reply_tracker.mark_as_replied(tid, comment_tid)
+        await runtime.interaction_log.save()
+        replied_count += 1
+        logger.info(
+            f"[#F38BA8]好友说说回复成功：QQ [#CBA6F7]{target_qq}[/#CBA6F7]"
+            f" 的说说下回复 [#CBA6F7]{target_name}[/#CBA6F7]"
+            f" → 「{reply_text}」[/#F38BA8]"
+        )
+
     # 剩余既未点赞也未评论的说说标记为已读（read）
     read_marked = 0
     for item in feed_items:
@@ -315,10 +406,12 @@ async def process_feed_monitor_batch(
         f"[#F38BA8]好友说说监控批量处理完成：共 [#CBA6F7]{len(feed_items)}"
         f"[/#CBA6F7] 条，点赞 [#CBA6F7]{liked_count}[/#CBA6F7] 条，"
         f"评论 [#CBA6F7]{result.succeeded}[/#CBA6F7] 条，"
+        f"回复评论 [#CBA6F7]{replied_count}[/#CBA6F7] 条，"
         f"仅读 [#CBA6F7]{read_marked}[/#CBA6F7] 条。[/#F38BA8]"
     )
     return {
         "liked": liked_count,
         "commented": result.succeeded,
+        "replied": replied_count,
         "decisions": decision_map,
     }
