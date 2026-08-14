@@ -398,6 +398,7 @@ class ContentService:
 
         personality_desc = get_personality_desc()
         current_time, _ = get_now_info()
+        bot_qq = await self._runtime.bot_qq()
 
         multimodal = bool(self._cfg.llm.multimodal_mode)
         image_map: dict[tuple[int, int], str] = {}
@@ -422,7 +423,9 @@ class ContentService:
                     f"多模态模式：下载 {len(image_map)}/{len(all_image_urls)} 张好友说说图片直接传模型。"
                 )
 
-        feed_items_block = format_feed_items_block(feed_items, multimodal=multimodal)
+        feed_items_block = format_feed_items_block(
+            feed_items, multimodal=multimodal, bot_qq=bot_qq
+        )
 
         prompt_text = await (
             template.set("personality_desc", personality_desc)

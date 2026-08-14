@@ -400,13 +400,12 @@ class FeedsMixin(QZoneClientBase):
 
                 soup = bs4.BeautifulSoup(html_content, "html.parser")
 
-                # 跳过已点赞的说说
+                # 提取点赞状态（已点赞的说说也返回，交由上层/LLM 决策是否再互动）
                 like_btn = soup.find("a", class_="qz_like_btn_v3")
-                if (
+                liked = (
                     isinstance(like_btn, bs4.Tag)
                     and like_btn.get("data-islike") == "1"
-                ):
-                    continue
+                )
 
                 text_div = soup.find("div", class_="f-info")
                 text = (
@@ -468,6 +467,7 @@ class FeedsMixin(QZoneClientBase):
                         "created_time": created_time,
                         "images": image_urls,
                         "comments": monitor_comments,
+                        "liked": liked,
                     }
                 )
 

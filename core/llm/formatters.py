@@ -85,7 +85,9 @@ def format_batch_comment_items(
 
 
 def format_feed_items_block(
-    feed_items: list[dict[str, Any]], multimodal: bool = False
+    feed_items: list[dict[str, Any]],
+    multimodal: bool = False,
+    bot_qq: str = "",
 ) -> str:
     """将好友说说列表格式化为提示词文本块。
 
@@ -93,6 +95,7 @@ def format_feed_items_block(
         feed_items: 说说项列表
         multimodal: 多模态模式下为 True，此时图片以 ``[[IMG:i:j]]`` 标记占位，
             由调用方内联为 Image 内容；否则使用 ``image_text``（VLM 识别描述）
+        bot_qq: Bot 自己的 QQ，用于在评论区中把 bot 的评论标注为「你（自己）」
 
     Returns:
         格式化后的多说说描述文本
@@ -107,10 +110,12 @@ def format_feed_items_block(
         image_text = item.get("image_text", "")
         comments = item.get("comments", []) or []
 
+        liked = bool(item.get("liked"))
+        like_state = "已点赞" if liked else "尚未点赞"
         block = (
             f"=== 说说 {i}/{total} ===\n"
             f"好友 QQ：{target_qq}  发布时间：{created_time}\n"
-            f"状态：尚未点赞\n"
+            f"状态：{like_state}\n"
             f"正文：「{content[:200]}{'…' if len(content) > 200 else ''}」\n"
         )
         if multimodal:
@@ -127,7 +132,12 @@ def format_feed_items_block(
                 qq = str(c.get("qq_account", "") or "").strip()
                 ctext = str(c.get("content", "") or "").strip()
                 ctid = str(c.get("comment_tid", "") or "").strip()
-                block += f"  · {nickname}"
+                # bot 自己的评论标注为「你（自己）」，便于 LLM 识别
+                if bot_qq and qq == str(bot_qq):
+                    display = "你（自己）"
+                else:
+                    display = nickname
+                block += f"  · {display}"
                 if qq:
                     block += f"(qq={qq})"
                 if ctid:

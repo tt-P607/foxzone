@@ -90,6 +90,10 @@ async def friend_monitor_once(runtime: "QZoneRuntime", num_feeds: int) -> None:
         for feed in candidate_feeds:
             target_qq = str(feed.get("target_qq", "")).strip()
             tid = str(feed.get("tid", "")).strip()
+            if runtime.interaction_log.has_liked(target_qq, tid):
+                # 本地 json 已记录点赞：不重复点赞，直接进入 LLM 决策
+                feed_items.append(_to_feed_item(feed))
+                continue
             try:
                 liked = await runtime.with_client(
                     lambda client, qq=target_qq, t=tid: client.like(qq, t)
@@ -130,6 +134,7 @@ def _to_feed_item(feed: dict[str, Any]) -> dict[str, Any]:
 
     ``target_qq`` 兼容两种数据源：好友动态流（feeds3_html_more，带
     ``target_qq``）与说说列表（msglist_v6，无该字段，退回取 ``uin``）。
+    ``liked`` 表示该说说是否已被点赞（动态流 HTML 的 data-islike）。
     """
     target_qq = (
         str(feed.get("target_qq", "")).strip()
@@ -141,6 +146,7 @@ def _to_feed_item(feed: dict[str, Any]) -> dict[str, Any]:
     created_time = str(feed.get("created_time", "")).strip()
     images: list[str] = [str(u) for u in feed.get("images", []) if u]
     comments: list[dict[str, Any]] = feed.get("comments", [])
+    liked: bool = bool(feed.get("liked"))
 
     image_lines: list[str] = [f"图片{j}：[待识别]" for j in range(1, len(images) + 1)]
 
@@ -153,6 +159,7 @@ def _to_feed_item(feed: dict[str, Any]) -> dict[str, Any]:
         "images": images,
         "comments": comments,
         "comment_count": len(comments),
+        "liked": liked,
     }
 
 
@@ -216,6 +223,12 @@ async def process_feed_monitor_batch(
             tid = str(item.get("tid", ""))
             target_qq = str(item.get("target_qq", ""))
             decision = decision_map.get(tid) or {}
+            if runtime.interaction_log.has_liked(target_qq, tid):
+                # 本地 json 已记录点赞：跳过重复点赞
+                logger.debug(
+                    f"好友说说：本地已记录点赞，跳过重复点赞 (qq={target_qq} tid={tid})"
+                )
+                continue
             if not (tid and target_qq and decision.get("like")):
                 logger.debug(
                     f"好友说说：决策不点赞，跳过 (qq={target_qq} tid={tid} "
