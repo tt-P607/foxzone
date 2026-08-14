@@ -30,6 +30,8 @@ SOURCE_BOTH = "both"
 ACTION_LIKE = "liked"
 ACTION_COMMENT = "commented"
 ACTION_READ = "read"
+#: 真实点赞状态标记（外部观察到的 bot 账号是否已点赞，不表示 bot 程序执行了点赞）
+LIKED_STATE = "liked_state"
 
 
 def _make_key(target_qq: str, feed_id: str) -> str:
@@ -91,7 +93,10 @@ class InteractionLog:
     # ------------------------------------------------------------------
 
     def has_liked(self, target_qq: str, feed_id: str) -> bool:
-        """是否已对该说说点赞过。
+        """bot 账号对该说说是否处于已点赞状态。
+
+        同时考虑外部同步的真实状态（``LIKED_STATE``，如用户手动用 bot 账号
+        点的赞）与 bot 程序执行过点赞（``ACTION_LIKE``）。
 
         Args:
             target_qq: 说说主人的 QQ 号
@@ -100,7 +105,8 @@ class InteractionLog:
         Returns:
             True 表示已点赞
         """
-        return bool(self._data.get(_make_key(target_qq, feed_id), {}).get(ACTION_LIKE))
+        entry = self._data.get(_make_key(target_qq, feed_id), {})
+        return bool(entry.get(LIKED_STATE)) or bool(entry.get(ACTION_LIKE))
 
     def has_commented(self, target_qq: str, feed_id: str) -> bool:
         """是否已对该说说发过评论。
@@ -329,6 +335,32 @@ class InteractionLog:
     # ------------------------------------------------------------------
     # 写入接口
     # ------------------------------------------------------------------
+
+    def sync_like_state(self, target_qq: str, feed_id: str, liked: bool) -> None:
+        """同步「bot 账号对该说说的真实点赞状态」到本地记录。
+
+        与 ``mark`` 不同，本方法不表示 bot 程序执行了点赞操作，而是记录
+        外部观察到的真实状态（如用户手动用 bot 账号点的赞、或说说明面上
+        已处于已点赞状态）。写入 ``LIKED_STATE`` 标记而非 ``ACTION_LIKE``，
+        因此不影响 ``has_seen`` 的「是否处理过」判定，也不影响外部回查的
+        互动聚合；仅使 ``has_liked`` 反映真实状态，避免重复点赞。
+
+        Args:
+            target_qq: 说说主人的 QQ 号
+            feed_id: 说说 tid
+            liked: 观察到的真实点赞状态
+        """
+        key = _make_key(target_qq, feed_id)
+        entry: dict[str, object] = self._data.setdefault(key, {})
+        current = bool(entry.get(LIKED_STATE))
+        if liked == current:
+            return
+        if liked:
+            entry[LIKED_STATE] = True
+        else:
+            entry.pop(LIKED_STATE, None)
+        entry["last_ts"] = time.time()
+        self._dirty = True
 
     def mark(
         self,

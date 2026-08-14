@@ -62,13 +62,18 @@ async def friend_monitor_once(runtime: "QZoneRuntime", num_feeds: int) -> None:
             logger.debug(f"好友说说监控：跳过无 target_qq/tid 的 feed: {feed}")
             continue
 
-        # 已处理（点赞/评论/仅读）则跳过
+        # 已处理（点赞/评论/仅读）则跳过；注意先判断 has_seen，避免把外部同步
+        # 的真实点赞状态误判为「已处理」而跳过。
         if runtime.interaction_log.has_seen(target_qq, tid):
             logger.info(
                 f"[#F5A97F]跳过已处理说说 (qq=[#CBA6F7]{target_qq}"
                 f"[/#CBA6F7], tid={tid})[/#F5A97F]"
             )
             continue
+
+        # 未处理说说：把外部观察到的真实点赞状态同步进本地记录（含用户手动
+        # 用 bot 账号点的赞），使 has_liked 反映真实状态，避免后续重复点赞。
+        runtime.interaction_log.sync_like_state(target_qq, tid, bool(feed.get("liked")))
 
         logger.debug(
             f"好友说说监控：候选说说 qq={target_qq} tid={tid} "
@@ -77,6 +82,9 @@ async def friend_monitor_once(runtime: "QZoneRuntime", num_feeds: int) -> None:
             f"评论数={len(feed.get('comments', []) or [])}"
         )
         candidate_feeds.append(feed)
+
+    # 落盘本轮回查同步的真实点赞状态（sync_like_state 产生的 dirty）
+    await runtime.interaction_log.save()
 
     if not candidate_feeds:
         logger.debug("本次好友说说监控无未处理说说。")
