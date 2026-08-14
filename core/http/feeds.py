@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import time
 from typing import Any
 
@@ -428,23 +429,68 @@ class FeedsMixin(QZoneClientBase):
                     image_urls.append(str(video_thumb["src"]))
                 image_urls = list(set(image_urls))
 
-                # 提取评论
+                # 提取评论：feeds3_html_more 的评论区使用 single-reply 结构，
+                # 每条含头像 href（QQ）、.nickname（昵称）、.comments-content（内容），
+                # 以及 act-reply 的 data-param 中的 t2_tid（评论 tid）/ t2_uin（评论者）。
                 monitor_comments: list[dict[str, Any]] = []
-                for comment_div in soup.find_all("div", class_="f-single-comment"):
+                for comment_div in soup.find_all("div", class_="single-reply"):
                     if not isinstance(comment_div, bs4.Tag):
                         continue
-                    author_a = comment_div.find("a", class_="f-nick")
-                    content_span = comment_div.find("span", class_="f-re-con")
-                    if isinstance(author_a, bs4.Tag) and isinstance(content_span, bs4.Tag):
-                        monitor_comments.append(
-                            {
-                                "qq_account": str(comment_div.get("data-uin", "")),
-                                "nickname": author_a.get_text(strip=True),
-                                "content": content_span.get_text(strip=True),
-                                "comment_tid": comment_div.get("data-tid", ""),
-                                "parent_tid": None,
-                            }
+                    # QQ 从头像 href 提取（user.qzone.qq.com/<qq>）
+                    qq_account = ""
+                    avatar = comment_div.find("div", class_="ui-avatar")
+                    if isinstance(avatar, bs4.Tag):
+                        avatar_a = avatar.find("a", href=True)
+                        if avatar_a is not None:
+                            href = str(avatar_a["href"])
+                            m = re.search(r"qzone\.qq\.com/(\d+)", href)
+                            if m:
+                                qq_account = m.group(1)
+                    # 昵称
+                    nickname = ""
+                    nick_a = comment_div.find("a", class_="nickname")
+                    if isinstance(nick_a, bs4.Tag):
+                        nickname = nick_a.get_text(strip=True)
+                    # 内容：comments-content 移除昵称锚点与操作区（comments-op）后的正文
+                    content = ""
+                    content_div = comment_div.find("div", class_="comments-content")
+                    if isinstance(content_div, bs4.Tag):
+                        # 用字符串重建副本，避免 extract 影响原 DOM
+                        content_soup = bs4.BeautifulSoup(
+                            str(content_div), "html.parser"
                         )
+                        op_div = content_soup.find("div", class_="comments-op")
+                        if op_div is not None:
+                            op_div.extract()
+                        nick_node = content_soup.find("a", class_="nickname")
+                        if nick_node is not None:
+                            nick_node.extract()
+                        content = content_soup.get_text(" ", strip=True)
+                        # 归一化空白（HTML 含大量制表符/换行）
+                        content = re.sub(r"\s+", " ", content).strip()
+                        # 去掉可能残留的 ":" 前缀
+                        content = re.sub(r"^:\s*", "", content).strip()
+                    # 评论 tid 与评论者：act-reply 的 data-param 中 t2_tid / t2_uin
+                    comment_tid = ""
+                    reply_a = comment_div.find("a", class_="act-reply")
+                    if isinstance(reply_a, bs4.Tag):
+                        data_param = str(reply_a.get("data-param", ""))
+                        m_tid = re.search(r"t2_tid=([^&\s]+)", data_param)
+                        if m_tid:
+                            comment_tid = m_tid.group(1)
+                        if not qq_account:
+                            m_uin = re.search(r"t2_uin=([^&\s]+)", data_param)
+                            if m_uin:
+                                qq_account = m_uin.group(1)
+                    monitor_comments.append(
+                        {
+                            "qq_account": qq_account,
+                            "nickname": nickname,
+                            "content": content,
+                            "comment_tid": comment_tid,
+                            "parent_tid": None,
+                        }
+                    )
 
                 # 发布时间：JSON 顶层 abstime（Unix 秒），转成与 list_feeds 一致的
                 # "YYYY-MM-DD HH:MM:SS"，供 LLM 提示词 format_story_time 解析。
