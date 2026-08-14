@@ -59,6 +59,7 @@ async def friend_monitor_once(runtime: "QZoneRuntime", num_feeds: int) -> None:
         tid: str = str(feed.get("tid", "")).strip()
 
         if not target_qq or not tid:
+            logger.debug(f"好友说说监控：跳过无 target_qq/tid 的 feed: {feed}")
             continue
 
         # 已处理（点赞/评论/仅读）则跳过
@@ -69,6 +70,12 @@ async def friend_monitor_once(runtime: "QZoneRuntime", num_feeds: int) -> None:
             )
             continue
 
+        logger.debug(
+            f"好友说说监控：候选说说 qq={target_qq} tid={tid} "
+            f"正文={str(feed.get('content', '') or feed.get('rt_con', ''))[:80]!r} "
+            f"图片数={len(feed.get('images', []) or [])} "
+            f"评论数={len(feed.get('comments', []) or [])}"
+        )
         candidate_feeds.append(feed)
 
     if not candidate_feeds:
@@ -184,6 +191,11 @@ async def process_feed_monitor_batch(
     decision_map: dict[str, dict[str, Any]] = {
         d["tid"]: d for d in feed_decisions if d.get("tid")
     }
+    for tid, d in decision_map.items():
+        logger.debug(
+            f"好友说说决策明细: tid={tid} target_qq={d.get('target_qq')} "
+            f"like={d.get('like')} comment={str(d.get('comment'))[:50]!r}"
+        )
 
     # ── 自主模式下先按决策执行点赞（like=True）并标记 LIKE ──
     liked_count = 0
@@ -193,7 +205,14 @@ async def process_feed_monitor_batch(
             target_qq = str(item.get("target_qq", ""))
             decision = decision_map.get(tid) or {}
             if not (tid and target_qq and decision.get("like")):
+                logger.debug(
+                    f"好友说说：决策不点赞，跳过 (qq={target_qq} tid={tid} "
+                    f"decision_like={decision.get('like')})"
+                )
                 continue
+            logger.debug(
+                f"好友说说：按决策执行点赞 (qq={target_qq} tid={tid})"
+            )
             try:
                 liked = await runtime.with_client(
                     lambda client, qq=target_qq, t=tid: client.like(qq, t)
@@ -218,7 +237,15 @@ async def process_feed_monitor_batch(
         tid = str(item.get("tid", ""))
         decision = decision_map.get(tid) or {}
         if decision.get("comment"):
+            logger.debug(
+                f"好友说说：决策评论 (qq={item.get('target_qq')} tid={tid} "
+                f"内容={str(decision.get('comment'))[:50]!r})"
+            )
             comment_items.append(item)
+        else:
+            logger.debug(
+                f"好友说说：决策不评论 (qq={item.get('target_qq')} tid={tid})"
+            )
 
     engine = BatchSendEngine(
         runtime.reply_send_lock,
@@ -274,6 +301,9 @@ async def process_feed_monitor_batch(
             continue
         runtime.interaction_log.mark(target_qq, tid, ACTION_READ, SOURCE_POLL)
         read_marked += 1
+        logger.debug(
+            f"好友说说：标记仅读 (qq={target_qq} tid={tid})"
+        )
     if read_marked:
         await runtime.interaction_log.save()
 

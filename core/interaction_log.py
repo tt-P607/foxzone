@@ -54,17 +54,37 @@ class InteractionLog:
         self._dirty: bool = False
 
     async def initialize(self) -> None:
-        """从持久化存储加载互动记录。"""
+        """从持久化存储加载互动记录。
+
+        对加载数据做类型与键格式校验：仅保留 ``{target_qq}:{feed_id}``
+        形式且值为 dict 的条目，其余视为脏数据丢弃，保证后续查询
+        （``entry.get(...)``）不会因类型异常而崩溃。
+        """
         loaded = await storage_api.load_json(_STORE_NAMESPACE, _STORE_KEY)
-        if loaded is not None and isinstance(loaded, dict):
-            log_data = loaded.get("log", {})
-            if isinstance(log_data, dict):
-                self._data = log_data
-                logger.debug(f"已加载互动记录：{len(self._data)} 条")
-            else:
-                logger.warning("互动记录格式异常，使用空记录初始化")
-        else:
-            logger.debug("互动记录文件不存在，使用空记录初始化")
+        if loaded is None or not isinstance(loaded, dict):
+            logger.debug("互动记录文件不存在或格式异常，使用空记录初始化")
+            self._data = {}
+            return
+        log_data = loaded.get("log", {})
+        if not isinstance(log_data, dict):
+            logger.warning("互动记录 log 字段非 dict，使用空记录初始化")
+            self._data = {}
+            return
+
+        cleaned: dict[str, dict[str, object]] = {}
+        dropped = 0
+        for key, entry in log_data.items():
+            if not isinstance(key, str) or ":" not in key:
+                dropped += 1
+                continue
+            if not isinstance(entry, dict):
+                dropped += 1
+                continue
+            cleaned[key] = entry
+        self._data = cleaned
+        if dropped:
+            logger.warning(f"互动记录加载时丢弃 {dropped} 条格式异常条目")
+        logger.debug(f"已加载互动记录：{len(self._data)} 条")
 
     # ------------------------------------------------------------------
     # 查询接口
@@ -136,7 +156,7 @@ class InteractionLog:
 
     def iter_followup_qqs(
         self, exclude_target_qq: str = "", limit: int = 0,
-        max_feed_age_hours: float = 0,
+        max_feed_age_hours: float = 0, only_target_qq: str = "",
     ) -> list[tuple[str, list[str]]]:
         """按「最久未回查」聚合返回需要回查的 (target_qq, [feed_ids…])。
 
@@ -149,6 +169,7 @@ class InteractionLog:
         Args:
             exclude_target_qq: 排除该 QQ
             limit: 最多返回多少个 QQ；<= 0 表示不限制
+            only_target_qq: 仅返回该 QQ（非空时生效），用于限定回查范围
             max_feed_age_hours: 评论过的说说超过该时长（小时）后不再回查；
                 <= 0 表示不限制。基于 ``last_ts``（最近一次互动时间）判定。
 
@@ -157,6 +178,7 @@ class InteractionLog:
         """
         bucket: dict[str, list[tuple[float, str]]] = {}
         exclude = str(exclude_target_qq).strip()
+        only = str(only_target_qq).strip()
         now = time.time()
         max_age_secs = (
             max_feed_age_hours * 3600.0 if max_feed_age_hours and max_feed_age_hours > 0 else 0.0
@@ -170,6 +192,8 @@ class InteractionLog:
             if not target_qq or not feed_id:
                 continue
             if exclude and target_qq == exclude:
+                continue
+            if only and target_qq != only:
                 continue
             if max_age_secs > 0:
                 last_ts_raw = entry.get("last_ts", 0)
@@ -195,6 +219,65 @@ class InteractionLog:
         if limit and limit > 0:
             qq_with_priority = qq_with_priority[:limit]
         return [(qq, fids) for _, qq, fids in qq_with_priority]
+
+    def iter_followup_feeds(
+        self, exclude_target_qq: str = "", limit: int = 0,
+        max_feed_age_hours: float = 0, only_target_qq: str = "",
+    ) -> list[tuple[str, str]]:
+        """按「最久未回查」返回需要回查的 (target_qq, feed_id) 列表。
+
+        以 bot 评论过的**单条说说**为粒度，而非以 QQ 聚合：每条
+        ``(target_qq, feed_id)`` 用其 ``last_followup_check`` 作为优先级，
+        最久未查者优先。每轮返回 ``limit`` 条 feed，调用方逐条
+        ``fetch_feed_detail`` 精准回查评论区，无需先拉整个 QQ 时间线，
+        也不受「时间线最近 20 条」范围限制。
+
+        Args:
+            exclude_target_qq: 排除该 QQ
+            limit: 最多返回多少条 feed；<= 0 表示不限制
+            max_feed_age_hours: 评论过的说说超过该时长（小时）后不再回查；
+                <= 0 表示不限制。基于 ``last_ts``（最近一次互动时间）判定。
+            only_target_qq: 仅返回该 QQ 下的 feed（非空时生效）
+
+        Returns:
+            ``[(target_qq, feed_id), …]``，按最久未回查优先排序。
+        """
+        exclude = str(exclude_target_qq).strip()
+        only = str(only_target_qq).strip()
+        now = time.time()
+        max_age_secs = (
+            max_feed_age_hours * 3600.0 if max_feed_age_hours and max_feed_age_hours > 0 else 0.0
+        )
+        entries: list[tuple[float, str, str]] = []
+        for key, entry in self._data.items():
+            if not entry.get(ACTION_COMMENT):
+                continue
+            if ":" not in key:
+                continue
+            target_qq, _, feed_id = key.partition(":")
+            if not target_qq or not feed_id:
+                continue
+            if exclude and target_qq == exclude:
+                continue
+            if only and target_qq != only:
+                continue
+            if max_age_secs > 0:
+                last_ts_raw = entry.get("last_ts", 0)
+                last_ts = (
+                    float(last_ts_raw)
+                    if isinstance(last_ts_raw, (int, float))
+                    else 0.0
+                )
+                if last_ts > 0 and (now - last_ts) > max_age_secs:
+                    continue
+            ts_raw = entry.get("last_followup_check", 0)
+            ts = float(ts_raw) if isinstance(ts_raw, (int, float)) else 0.0
+            entries.append((ts, target_qq, feed_id))
+
+        entries.sort(key=lambda x: x[0])
+        if limit and limit > 0:
+            entries = entries[:limit]
+        return [(qq, fid) for _, qq, fid in entries]
 
     def mark_followup_checked(self, target_qq: str, feed_id: str) -> None:
         """更新该 (target_qq, feed_id) 的最近回查时间戳。

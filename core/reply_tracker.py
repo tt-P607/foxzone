@@ -35,24 +35,41 @@ class ReplyTrackerService:
     async def initialize(self) -> None:
         """从持久化存储加载已有回复记录。
 
-        应在插件加载时的异步初始化流程中调用。
-        若存储文件不存在，则使用空数据初始化。
+        对加载数据做类型校验：``data`` 必须是 dict 且每个 feed 值必须是
+        dict（``{comment_id: timestamp}``），异常条目丢弃，避免后续
+        ``has_replied`` 因类型异常而崩溃。应在插件加载时调用。
+
         """
         loaded = await storage_api.load_json(_STORE_NAMESPACE, _STORE_KEY)
-        if loaded is not None:
-            if isinstance(loaded, dict) and "data" in loaded:
-                self._data = loaded
-                feed_count = len(self._data["data"])
-                comment_count = sum(
-                    len(v) for v in self._data["data"].values()
-                )
-                logger.info(
-                    f"已加载回复跟踪数据：{feed_count} 条说说，{comment_count} 条评论记录。"
-                )
-            else:
-                logger.warning("回复跟踪数据格式不正确，将使用空数据初始化。")
-        else:
-            logger.debug("回复跟踪数据文件不存在，使用空数据初始化。")
+        if loaded is None or not isinstance(loaded, dict):
+            logger.debug("回复跟踪数据文件不存在或格式异常，使用空数据初始化。")
+            self._data = {"data": {}}
+            return
+        raw_data = loaded.get("data", {})
+        if not isinstance(raw_data, dict):
+            logger.warning("回复跟踪数据 data 字段非 dict，使用空数据初始化。")
+            self._data = {"data": {}}
+            return
+
+        cleaned: dict[str, dict[str, float]] = {}
+        dropped = 0
+        for feed_id, comments in raw_data.items():
+            if not isinstance(comments, dict):
+                dropped += 1
+                continue
+            cleaned[feed_id] = {
+                str(cid): float(ts)
+                for cid, ts in comments.items()
+                if isinstance(ts, (int, float))
+            }
+        self._data = {"data": cleaned}
+        if dropped:
+            logger.warning(f"回复跟踪数据加载时丢弃 {dropped} 条格式异常 feed 条目")
+        feed_count = len(cleaned)
+        comment_count = sum(len(v) for v in cleaned.values())
+        logger.info(
+            f"已加载回复跟踪数据：{feed_count} 条说说，{comment_count} 条评论记录。"
+        )
 
     # ------------------------------------------------------------------
     # 查询接口

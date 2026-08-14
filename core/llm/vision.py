@@ -125,45 +125,50 @@ async def describe_images(
     return result
 
 
-async def download_images(urls: list[str]) -> list[str]:
-    """下载图片 URL 为 base64 data 字符串（供多模态模式直接传给模型）。
+async def download_images_map(urls: list[str]) -> dict[str, str]:
+    """下载图片 URL 并返回 ``{url: base64_data}`` 精确映射。
+
+    多模态模式下，调用方需要按 URL 精确关联图片与其在提示词中的位置，
+    避免顺序匹配导致的多图错位。下载失败或非 200 的 URL 不进入结果。
 
     Args:
         urls: 图片 URL 列表
 
     Returns:
-        ``base64|<bytes>`` 格式的 data 字符串列表；下载失败或非 200 的 URL 被跳过。
+        ``{url: base64|<bytes> data}`` 映射；失败 URL 不在结果中
     """
     if not urls:
-        return []
+        return {}
 
     import base64
 
     sem = asyncio.Semaphore(_MAX_CONCURRENCY)
 
-    async def _download_one(session: aiohttp.ClientSession, url: str) -> str | None:
-        """下载单张图片并编码为 base64 data；失败返回 None。"""
+    async def _download_one(
+        session: aiohttp.ClientSession, url: str
+    ) -> tuple[str, str | None]:
+        """下载单张图片，返回 (url, base64 data)；失败返回 (url, None)。"""
         async with sem:
             try:
                 async with session.get(url) as resp:
                     if resp.status != 200:
                         logger.warning(f"下载图片失败（HTTP {resp.status}）: {url}")
-                        return None
+                        return url, None
                     image_data = await resp.read()
                 encoded = base64.b64encode(image_data).decode("ascii")
-                return f"base64|{encoded}"
+                return url, f"base64|{encoded}"
             except Exception as exc:
                 logger.warning(f"下载图片失败 {url}: {exc}")
-                return None
+                return url, None
 
     async with aiohttp.ClientSession(
         timeout=aiohttp.ClientTimeout(total=_SESSION_TIMEOUT)
     ) as session:
-        results = await asyncio.gather(
+        pairs = await asyncio.gather(
             *[_download_one(session, url) for url in urls]
         )
 
-    return [r for r in results if r]
+    return {url: data for url, data in pairs if data}
 
 
 async def fill_image_text(
@@ -172,8 +177,6 @@ async def fill_image_text(
     cache: "ImageVisionCache",
 ) -> None:
     """收集 feed 项中的图片 URL、批量识别并回填 ``image_text`` 字段。
-
-    原逻辑在 service 与 chatter 中重复出现两次，此处收敛为一处。
 
     Args:
         feed_items: 说说项列表，每项可含 ``images``（URL 列表）

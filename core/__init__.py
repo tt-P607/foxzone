@@ -4,12 +4,7 @@
 与框架组件系统无关的纯业务逻辑。
 """
 
-from .comment_tree import (
-    build_threaded_view,
-    is_local_seq_tid,
-    resolve_root_comment,
-    resolve_root_comment_tid,
-)
+from .comment_tree import build_threaded_view
 from .cookie import CookieService
 from .http import QZoneAPIClient
 from .interaction_log import InteractionLog
@@ -25,7 +20,4 @@ __all__ = [
     "QZoneAPIClient",
     "ReplyTrackerService",
     "build_threaded_view",
-    "is_local_seq_tid",
-    "resolve_root_comment",
-    "resolve_root_comment_tid",
 ]

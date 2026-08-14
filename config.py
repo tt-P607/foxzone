@@ -90,14 +90,15 @@ class FoxZoneConfig(BaseConfig):
             ),
         )
         external_followup_batch: int = Field(
-            default=1,
+            default=3,
             description=(
-                "外部空间回查每轮最多检查的 (qq, feed) 数量。"
-                "采用「最久未检测优先」轮转策略，避免单轮请求过多触发 QZone 限流。"
+                "外部空间回查每轮最多检查的说说条数（feed 粒度）。"
+                "采用「最久未回查优先」轮转策略，每轮查 3 条、轮流推进，"
+                "避免单轮请求过多触发 QZone 限流。"
             ),
         )
         external_followup_max_feed_age_hours: float = Field(
-            default=72.0,
+            default=48.0,
             description=(
                 "外部回查时，bot 评论过的说说超过此时长（小时）后不再回查。"
                 "0 表示不限制。基于评论的最近一次互动时间（last_ts）判定。"
@@ -156,143 +157,9 @@ class FoxZoneConfig(BaseConfig):
             default=3.0, description="首次重试等待秒数，此后逐次递增（如 3/6/9 秒）"
         )
 
-    @config_section("prompts")
-    class PromptsSection(SectionBase):
-        """提示词模板配置（唯一真源，共 4 个字段）。
-
-        所有提示词文本均存放于本节。框架在首次加载或字段缺失时会按
-        ``Field(default=...)`` 自动写回 ``config.toml``，用户后续修改不会被覆盖。
-        修改本节字段后重启插件即生效。
-
-        模板内变量占位符（PromptTemplate.build 阶段由调用方传入）：
-          ``{personality_desc}`` / ``{current_time}`` / ``{weekday}`` /
-          ``{topic_desc}`` / ``{history}`` / ``{comment_items_block}`` /
-          ``{feed_items_block}`` / ``{output_format}``。
-
-        共用占位符：
-          ``__GUIDELINES__`` 在注册到 PromptManager 前会被
-          ``comment_guidelines`` 字段实际文本一次性替换。
-        """
-
-        comment_guidelines: str = Field(
-            default=(
-                "【QZone 评论统一规范（必须严格遵守）】\n"
-                "1. 字数严格控制在 30 字以内。\n"
-                "2. 自然口语化，符合人格特征，禁止任何 Emoji。\n"
-                "3. 禁止在开头添加 @某人，系统会自动处理。\n"
-                "4. 不要写「期待你下次分享」「等你更新」之类诱导对方回复的话。\n"
-                "5. 多条评论之间避免重复的句式 / 开场词 / 句尾点缀。\n"
-                "6. 人设里反复出现的标签词是底色，不要让它们在评论里几乎每条都跳出来。"
-            ),
-            description=(
-                "评论统一规范（被评论类模板共用）。"
-                "在 comment_reply_batch / friend_feed_interact 模板内"
-                "通过 __GUIDELINES__ 占位符替换。"
-            ),
-        )
-        story_generate: str = Field(
-            default=(
-                "{personality_desc}\n\n"
-                "现在是 {current_time}（{weekday}），"
-                "你想写一条{topic_desc}的说说发表在 QQ 空间上。\n\n"
-                "**说说文本规则：**\n"
-                "1. **绝对禁止**在说说中直接、完整地提及当前的年月日或几点几分。\n"
-                "2. 将当前时间作为创作背景，用它判断现在是「清晨」「傍晚」还是「深夜」。\n"
-                "3. 使用自然、模糊的词语暗示时间，例如「刚刚」「今天下午」「夜深啦」。\n"
-                "4. **内容简短**：总长度严格控制在 100 字以内。\n"
-                "5. **禁止表情**：严禁使用任何 Emoji 表情符号。\n"
-                "6. **严禁重复**：下方提供最近发过的说说历史，必须创作全新的、"
-                "与历史记录内容和主题都不同的说说。\n"
-                "7. 不要刻意突出自身学科背景，不要浮夸，不要夸张修辞。\n\n"
-                "**输出格式（JSON）：**\n"
-                "只输出一个合法 JSON，不含任何前缀、后缀或 Markdown 代码块。\n"
-                "{output_format}\n\n"
-                "---历史说说记录---\n"
-                "{history}"
-            ),
-            description="模板 1/3：写说说正文（foxzone.story.generate）",
-        )
-        comment_reply_batch: str = Field(
-            default=(
-                "{personality_desc}\n\n"
-                "当前时间：{current_time}\n\n"
-                "以下是你的 QQ 空间最近收到的新评论，请逐条判断是否需要回复。\n\n"
-                "{comment_items_block}\n\n"
-                "**关于场景：**\n"
-                "QQ 空间评论区不是即时聊天，是说说作者与互动者之间留言式的互动。\n"
-                "你可以选择回复，也可以选择不回复——两者都是常见、合理的处置方式。\n\n"
-                "**决策时可以参考：**\n"
-                "1. 评论的内容性质（提问 / 关心 / 共鸣 / 表情 / 客套 / 一句感慨）；\n"
-                "2. 是否真的有想说的话，还是只是“为了回而回”；\n"
-                "3. 时效性：每条评论均已标注发布时间，结合与当前时间的差距综合判断——若过去很久才收到提醒，可酌情考虑是否还有回复价值；若决定回复，自然带出「刚看到」的语感即可，无需假装即时；\n"
-                "4. **接力对话识别**：若某条评论被标注「在接你的话」（⚠ 标记），表示对方在回复你之前的发言——必须承接上下文、回应对方的话题或疑问，禁止重起新话题或答非所问；\n"
-                "5. 同一条说说下若已有你的回复（评论区中显示为「你」），可酌情决定是否继续互动。\n\n"
-                "__GUIDELINES__\n\n"
-                "**输出格式（JSON 数组）：**\n"
-                "只输出合法 JSON 数组，不含任何前缀、后缀或 Markdown 代码块。\n"
-                "reply=null 表示不回复该评论；非 null 则填写回复正文。\n"
-                '[{{"comment_tid": "评论ID", "feed_id": "说说ID", "reply": "回复内容或 null"}}]'
-            ),
-            description=(
-                "模板 2/3：批量决策回复自己说说下的新评论"
-                "（foxzone.comment.reply.batch）"
-            ),
-        )
-        friend_feed_interact: str = Field(
-            default=(
-                "{personality_desc}\n\n"
-                "当前时间：{current_time}\n\n"
-                "<task>\n"
-                "以下是好友们最近发布的说说，请对每条独立判断「是否点赞」"
-                "与「是否评论」。点赞与评论是两个独立的动作，互不绑定，"
-                "也都不是必须——可以不点赞、可以只点赞不评论、可以两者都做，"
-                "甚至只浏览不表态，都是正常选择。\n"
-                "</task>\n\n"
-                "{feed_items_block}\n\n"
-                "<context>\n"
-                "QQ 空间不是聊天框，是好友间留言式的轻互动场景。\n"
-                "点赞通常表示已读与认同；如果你觉得内容不合适，也可以不点赞、仅阅读。\n"
-                "评论是你顺手留下的一句感想，写或不写都属于正常选择。\n"
-                "</context>\n\n"
-                "<decision_principles>\n"
-                "# 点赞\n"
-                "- 点赞代表已读 + 认同；对没共鸣、不认同或内容不合适的内容，可以选择不点赞；\n"
-                "- 不点赞也没有关系，未点赞的说说仍会被记录为已读，不会反复提醒你。\n"
-                "\n"
-                "# 评论不是聊天\n"
-                "- 评论是你顺手留下的一句感想，不是对话开头；\n"
-                "- 不要 @ 说说作者，不要以“你”开头问候；\n"
-                "- 不必把每条都接住，也没有“必须保持互动”的义务。\n"
-                "\n"
-                "# 内容判断\n"
-                "- 评论的取舍可以参考：是否有共鸣、是否有想说的话、是否适合此情景；\n"
-                "- 看不懂、纯转发、公式化营销、明显不需要外人插话的场合，可以选择不评论；\n"
-                "- 决定写时，按下方 GUIDELINES 控制字数与措辞。\n"
-                "\n"
-                "# 情绪匹配\n"
-                "- 说说是负面/严肃话题→ 收起玩笑，语气克制；\n"
-                "- 说说是日常吐槽/晒图→ 自然延续氛围，不要强行升华。\n"
-                "\n"
-                "# 时效性\n"
-                "- 结合发布时间与当前时间的差距调整语气。\n"
-                "</decision_principles>\n\n"
-                "__GUIDELINES__\n\n"
-                "<output_format>\n"
-                "只输出合法 JSON 数组，不含任何前缀、后缀或 Markdown 代码块。\n"
-                "like=true 表示点赞、false 表示不点赞；comment=null 表示不评论，"
-                "非 null 则填写评论正文。\n"
-                '[{{"tid": "说说ID", "target_qq": "QQ号", "like": true或false, "comment": "评论内容或 null"}}]\n'
-                "</output_format>"
-            ),
-            description=(
-                "模板 3/3：好友说说互动决策（点赞 + 评论，foxzone.friend.feed.interact）"
-            ),
-        )
-
     # ---------- 字段声明（顺序与 Section 定义一致）----------
     general: GeneralSection = Field(default_factory=GeneralSection)
     llm: LLMSection = Field(default_factory=LLMSection)
     monitor: MonitorSection = Field(default_factory=MonitorSection)
     cookie: CookieSection = Field(default_factory=CookieSection)
-    prompts: "PromptsSection" = Field(default_factory=lambda: FoxZoneConfig.PromptsSection())
 

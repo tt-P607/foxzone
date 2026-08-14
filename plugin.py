@@ -74,9 +74,8 @@ class FoxZonePlugin(BasePlugin):
             logger.warning("FoxZone 插件未启用（general.enabled=false），跳过初始化。")
             return
 
-        # 1. 注册提示词模板（模板文本来自 config.prompts，由配置框架
-        #    根据 PromptsSection 的 Field(default=...) 自动落盘到 config.toml）
-        register_foxzone_prompts(cfg)
+        # 1. 注册提示词模板（模板文本以硬编码常量定义在 prompts.py）
+        register_foxzone_prompts()
         logger.info("FoxZone 提示词模板注册完成。")
 
         # 2. 创建插件级运行时单例并加载持久化状态

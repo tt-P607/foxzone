@@ -157,6 +157,13 @@ class FeedsMixin(QZoneClientBase):
                 f"[#F38BA8]从 QQ [#CBA6F7]{target_qq}[/#CBA6F7] 的空间"
                 f"获取到 [#CBA6F7]{len(feeds_list)}[/#CBA6F7] 条说说[/#F38BA8]"
             )
+            for f in feeds_list:
+                logger.debug(
+                    f"list_feeds 条目: tid={f.get('tid')} "
+                    f"正文={str(f.get('content'))[:60]!r} "
+                    f"图片数={len(f.get('images', []) or [])} "
+                    f"评论数={len(f.get('comments', []) or [])}"
+                )
             return feeds_list
 
         except RuntimeError:
@@ -440,11 +447,25 @@ class FeedsMixin(QZoneClientBase):
                             }
                         )
 
+                # 发布时间：JSON 顶层 abstime（Unix 秒），转成与 list_feeds 一致的
+                # "YYYY-MM-DD HH:MM:SS"，供 LLM 提示词 format_story_time 解析。
+                abstime_raw = feed.get("abstime", 0)
+                try:
+                    abstime = int(abstime_raw) if abstime_raw else 0
+                except (TypeError, ValueError):
+                    abstime = 0
+                created_time = (
+                    time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(abstime))
+                    if abstime > 0
+                    else ""
+                )
+
                 feeds_list.append(
                     {
                         "target_qq": target_qq_str,
                         "tid": tid,
                         "content": text,
+                        "created_time": created_time,
                         "images": image_urls,
                         "comments": monitor_comments,
                     }
@@ -454,6 +475,12 @@ class FeedsMixin(QZoneClientBase):
                 f"[#F38BA8]监控发现 [#CBA6F7]{len(feeds_list)}[/#CBA6F7]"
                 f" 条未处理的新说说[/#F38BA8]"
             )
+            for f in feeds_list:
+                logger.debug(
+                    f"monitor_list_feeds 条目: target_qq={f.get('target_qq')} "
+                    f"tid={f.get('tid')} 正文={str(f.get('content'))[:60]!r} "
+                    f"图片数={len(f.get('images', []) or [])}"
+                )
             return feeds_list
 
         except RuntimeError:

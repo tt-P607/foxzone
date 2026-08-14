@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import re
 import typing
 from typing import Any
 
@@ -29,7 +30,7 @@ from .parsers import (
     parse_simple_json_text,
 )
 from .personality import get_now_info, get_personality_desc
-from .vision import describe_images, download_images
+from .vision import describe_images, download_images_map
 
 if typing.TYPE_CHECKING:
     from ...config import FoxZoneConfig
@@ -98,29 +99,77 @@ class ContentService:
         request_name: str,
         prompt_text: str,
         images: list[str] | None = None,
+        content: list[Any] | None = None,
     ) -> str:
         """统一发送提示词并返回完整文本结果；可选附带多模态图片。
 
         Args:
             task_name: 模型任务名
             request_name: 请求名
-            prompt_text: 提示词文本
+            prompt_text: 提示词文本（用于日志展示）
             images: 可选的 ``base64|...`` 图片 data 列表，以多模态 payload 附加
+            content: 可选；已内联好的 Text/Image 交替 content 列表，
+                传入时优先于 ``prompt_text`` 与 ``images`` 的默认拼接
         """
         model_set = self._get_model_set(task_name)
         if model_set is None:
+            logger.error(f"_send_prompt 无可用 ModelSet: task={task_name} request={request_name}")
             return ""
+
+        n_text = sum(1 for c in (content or []) if getattr(c, "type", "") == "text")
+        n_img = sum(1 for c in (content or []) if getattr(c, "type", "") == "image")
+        logger.debug(
+            f"发送 LLM 请求: task={task_name} request={request_name} "
+            f"content_items={len(content or [])} (text={n_text}, image={n_img}) "
+            f"prompt_len={len(prompt_text)}"
+        )
 
         log_llm_prompt(request_name, 用户消息=prompt_text)
 
-        content: list[Any] = [Text(prompt_text)]
-        if images:
-            content.extend(Image(data) for data in images)
+        if content is None:
+            content = [Text(prompt_text)]
+            if images:
+                content.extend(Image(data) for data in images)
 
         request = create_llm_request(model_set, request_name=request_name)
         request.add_payload(LLMPayload(ROLE.USER, content))
         response = await request.send(stream=False)
         return await response
+
+    @staticmethod
+    def _inline_feed_images(
+        text: str, image_map: dict[tuple[int, int], str]
+    ) -> list[Any]:
+        """将提示词中的 ``[[IMG:i:j]]`` 标记替换为 Text + Image 邻接内容。
+
+        每条说说的图片标记按说说序号 i、图片序号 j 精确映射到图片数据，
+        使模型能明确知道图片归属哪条说说，避免多说说批量决策时图片错位。
+
+        Args:
+            text: 含 ``[[IMG:i:j]]`` 标记的提示词文本
+            image_map: ``{(i, j): base64_data}`` 映射
+
+        Returns:
+            Text/Image 交替排列的内容列表
+        """
+        pattern = re.compile(r"\[\[IMG:(\d+):(\d+)\]\]")
+        content: list[Any] = []
+        cursor = 0
+        for match in pattern.finditer(text):
+            if match.start() > cursor:
+                content.append(Text(text[cursor:match.start()]))
+            key = (int(match.group(1)), int(match.group(2)))
+            data = image_map.get(key)
+            if data:
+                content.append(Image(data))
+            else:
+                content.append(Text(match.group(0)))
+            cursor = match.end()
+        if cursor < len(text):
+            content.append(Text(text[cursor:]))
+        if not content:
+            content.append(Text(text))
+        return content
 
     # ------------------------------------------------------------------
     # 自己说说快照（供说说生成 / 评论回复提供上下文）
@@ -254,22 +303,34 @@ class ContentService:
         current_time, _ = get_now_info()
         bot_qq = await self._runtime.bot_qq()
 
-        # 收集所有说说配图 URL
-        all_image_urls: list[str] = []
-        for item in comment_items:
-            all_image_urls.extend(str(u) for u in item.get("feed_images", []) if u)
-
         multimodal = bool(self._cfg.llm.multimodal_mode)
         image_descs: dict[str, str] = {}
-        multimodal_images: list[str] = []
-        if all_image_urls:
-            if multimodal:
-                # 多模态模式：直接下载图片作为 payload 传给模型，跳过 VLM 识图
-                multimodal_images = await download_images(all_image_urls)
+        image_map: dict[tuple[int, int], str] = {}
+        if multimodal:
+            # 多模态模式：按 (评论序号, 图片序号) 下载图片并精确关联，
+            # 跳过 VLM 识图，图片随文本邻接内联，避免错位。
+            all_image_urls: list[str] = []
+            url_keys: list[tuple[tuple[int, int], str]] = []
+            for i, item in enumerate(comment_items, 1):
+                urls = [str(u) for u in item.get("feed_images", []) if u]
+                for j, url in enumerate(urls, 1):
+                    all_image_urls.append(url)
+                    url_keys.append(((i, j), url))
+            if all_image_urls:
+                url_to_data = await download_images_map(all_image_urls)
+                image_map = {
+                    key: url_to_data[url]
+                    for key, url in url_keys
+                    if url in url_to_data
+                }
                 logger.info(
-                    f"多模态模式：下载 {len(multimodal_images)}/{len(all_image_urls)} 张说说图片直接传模型。"
+                    f"多模态模式：下载 {len(image_map)}/{len(all_image_urls)} 张说说图片直接传模型。"
                 )
-            else:
+        else:
+            all_image_urls = [
+                str(u) for item in comment_items for u in item.get("feed_images", []) if u
+            ]
+            if all_image_urls:
                 image_descs = await describe_images(
                     all_image_urls,
                     self._cfg.llm.vision_model_task,
@@ -277,7 +338,7 @@ class ContentService:
                 )
 
         comment_items_block = format_batch_comment_items(
-            comment_items, bot_qq, image_descs=image_descs
+            comment_items, bot_qq, image_descs=image_descs, multimodal=multimodal
         )
 
         prompt_text = await (
@@ -290,14 +351,23 @@ class ContentService:
             prompt_text, "便于你在回复评论时联想到自己当时发说说的语境与心情"
         )
 
+        content = (
+            self._inline_feed_images(prompt_text, image_map) if multimodal else None
+        )
+
         response_text = await self._send_prompt(
             self._cfg.llm.comment_model_task,
             "foxzone.comment.reply.batch",
             prompt_text,
-            images=multimodal_images or None,
+            content=content,
         )
 
         decisions = parse_batch_reply_decisions(response_text)
+        for d in decisions:
+            logger.debug(
+                f"评论回复决策明细: comment_tid={d.get('comment_tid')} "
+                f"feed_id={d.get('feed_id')} reply={str(d.get('reply'))[:60]!r}"
+            )
         logger.info(
             f"批量评论决策完成：{len(comment_items)} 条评论，"
             f"{sum(1 for d in decisions if d.get('reply'))} 条决定回复。"
@@ -330,19 +400,29 @@ class ContentService:
         current_time, _ = get_now_info()
 
         multimodal = bool(self._cfg.llm.multimodal_mode)
-        multimodal_images: list[str] = []
+        image_map: dict[tuple[int, int], str] = {}
         if multimodal:
-            # 多模态模式：直接下载全部说说图片传给模型，跳过 VLM 识图
+            # 多模态模式：按 (说说序号, 图片序号) 下载图片并精确关联，
+            # 跳过 VLM 识图，图片随文本邻接内联，避免批量决策时错位。
             all_image_urls: list[str] = []
-            for item in feed_items:
-                all_image_urls.extend(str(u) for u in item.get("images", []) if u)
+            url_keys: list[tuple[tuple[int, int], str]] = []
+            for i, item in enumerate(feed_items, 1):
+                urls = [str(u) for u in item.get("images", []) if u]
+                for j, url in enumerate(urls, 1):
+                    all_image_urls.append(url)
+                    url_keys.append(((i, j), url))
             if all_image_urls:
-                multimodal_images = await download_images(all_image_urls)
+                url_to_data = await download_images_map(all_image_urls)
+                image_map = {
+                    key: url_to_data[url]
+                    for key, url in url_keys
+                    if url in url_to_data
+                }
                 logger.info(
-                    f"多模态模式：下载 {len(multimodal_images)}/{len(all_image_urls)} 张好友说说图片直接传模型。"
+                    f"多模态模式：下载 {len(image_map)}/{len(all_image_urls)} 张好友说说图片直接传模型。"
                 )
 
-        feed_items_block = format_feed_items_block(feed_items)
+        feed_items_block = format_feed_items_block(feed_items, multimodal=multimodal)
 
         prompt_text = await (
             template.set("personality_desc", personality_desc)
@@ -351,14 +431,23 @@ class ContentService:
             .build()
         )
 
+        content = (
+            self._inline_feed_images(prompt_text, image_map) if multimodal else None
+        )
+
         response_text = await self._send_prompt(
             self._cfg.llm.comment_model_task,
             "foxzone.friend.feed.interact",
             prompt_text,
-            images=multimodal_images or None,
+            content=content,
         )
 
         decisions = parse_feed_decisions(response_text)
+        for d in decisions:
+            logger.debug(
+                f"好友说说决策明细: tid={d.get('tid')} target_qq={d.get('target_qq')} "
+                f"like={d.get('like')} comment={str(d.get('comment'))[:60]!r}"
+            )
         logger.info(
             f"好友说说评论决策完成：{len(feed_items)} 条说说，"
             f"决定评论 {sum(1 for d in decisions if d.get('comment'))} 条。"

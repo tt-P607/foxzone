@@ -320,6 +320,24 @@ class QZoneService(BaseService):
             max_feed_age_hours=max_feed_age_hours,
         )
 
+    async def iter_followup_feeds(
+        self, exclude_qq: str = "", limit: int = 0,
+        max_feed_age_hours: float = 0, only_target_qq: str = "",
+    ) -> list[tuple[str, str]]:
+        """按「最久未回查」返回需回查的 (target_qq, feed_id) 列表（feed 粒度）。
+
+        Args:
+            exclude_qq: 排除该 QQ（通常是 bot 自己）
+            limit: 本轮最多回查多少条 feed；<= 0 表示不限
+            max_feed_age_hours: 评论过的说说超过该时长（小时）则不再回查；
+                <= 0 表示不限。
+            only_target_qq: 仅返回该 QQ 下的 feed（非空时生效）
+        """
+        return self._rt.interaction_log.iter_followup_feeds(
+            exclude_target_qq=exclude_qq, limit=limit,
+            max_feed_age_hours=max_feed_age_hours, only_target_qq=only_target_qq,
+        )
+
     # ------------------------------------------------------------------
     # 识图 / LLM 决策 / 文本块（转发到 core.llm）
     # ------------------------------------------------------------------

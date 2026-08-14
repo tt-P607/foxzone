@@ -2,7 +2,7 @@
 
 本文档记录 FoxZone 插件所使用的 QQ 空间 HTTP API，包括 Cookie 获取流程、全部端点说明、参数规范及已知注意事项。
 
-> **参考来源**：本文档根据 [astrbot_plugin_qzone](https://github.com/jokerwho/astrbot_plugin_qzone) 最新实现对照更新，最后同步时间：2025 年。
+> **参考来源**：本文档内容对照 [astrbot_plugin_qzone](https://github.com/jokerwho/astrbot_plugin_qzone) 与 QQ 空间真实请求行为整理。
 
 ---
 
@@ -181,7 +181,7 @@ Connection: keep-alive
 | `filter` | 固定 `all` |
 | `flag` | 固定 `1` |
 | `applist` | 固定 `all` |
-| `pagenum` | 页码（实测可能无效），默认 `1` |
+| `pagenum` | 页码，默认 `1`（该 CGI 深分页依赖时间游标，页码仅首页可靠） |
 | `count` | 获取数量 |
 | `format` | 固定 `json` |
 | `useutf8` | 固定 `1` |
@@ -375,7 +375,7 @@ QQ 空间 API 响应为非标准 JSON，存在以下格式变体：
 
 1. **回复端点域名**：回复（二级评论）与评论（一级评论）接口均使用 `user.qzone.qq.com` 子域（详见 §3.5）。
 
-2. **`commentId` vs `parent_tid`**：旧版回复参数 `parent_tid` 已不再有效，必须改用 `commentId` + `commentUin` 组合。
+2. **`commentId` vs `parent_tid`**：回复接口使用 `commentId` + `commentUin` 组合定位被回复评论，不使用 `parent_tid` 参数。
 
 3. **Cookie 缓存策略**：Cookie 缓存于 `data/foxzone/cookies/cookies-<qq>.json`。当 API 返回 code=-3000 时，需调用 `CookieService.clear_cache()` 清除缓存并重新获取。
 
@@ -398,11 +398,13 @@ QQ 空间 API 响应为非标准 JSON，存在以下格式变体：
   - 子域必须是 `taotao.qq.com`，不是 `taotao.qzone.qq.com`，写错会返回 `code=-10004`。
 - 必传参数仅 4 个：`uin`、`tid`、`format=jsonp`、`g_tk`。任何额外字段都会被反爬识别为异常请求，返回 `-10004`。
 - 响应是 JSONP，需先剥掉 `_Callback(...)` 或 `frameElement.callback(...)` 外壳再 JSON 解析。
-- 用途：评论一旦超出 `msglist_v6` 时间线最近 5 条一级评论范围，必须靠该接口拿到完整评论树才能解析 `parent_tid` 的根节点。
+- 用途：按 tid 精准拉取单条说说的完整评论树（含 list_3 楼中楼），供外部回查解析被回复评论的父级归属。
 
-### 7.2 msglist_v6 内嵌评论 `tid` 是局部序号
+### 7.2 评论 `tid` 形态与 `reply` 的 `commentId`
 
-`msglist_v6` 内嵌 `list_3` 楼中楼的 `tid` 是该说说内的局部序号（如 `"1"`、`"9"`），不是 hex 全局 tid；`msgdetail_v6` 才返回 hex 全局 tid。`reply` 接口的 `commentId` 必须是**顶层一级评论的 hex tid**——若溯源后仍是局部序号形态（`core/comment_tree.py` 的 `is_local_seq_tid` 预检），说明缺一级父节点，直接跳过避免触发 -10049。
+`msglist_v6` 内嵌 `list_3` 楼中楼的 `tid` 以及 `msgdetail_v6` 返回的一级/二级评论 `tid` **均为该说说内的数字局部序号**（如 `"1"`），不是 24 位 hex 全局 tid。`reply` 接口的 `commentId` 直接使用该数字 tid 即可成功——服务端按 `topicId` + `commentId` 定位评论，不要求 hex 形态。
+
+`commentId` 取**被回复子评论的 `parent_tid` 字段**：msgdetail_v6 中该字段即所属顶层一级评论的 tid（顶层 tid 在顶层内唯一，子回复一律挂在某条顶层下），直接使用即可。全量溯源不可行，因为子回复 tid 与一级 tid 从 1 各自编号、跨层级冲突。
 
 ### 7.3 限流处理（`-10049`）
 

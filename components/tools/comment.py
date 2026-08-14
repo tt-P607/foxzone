@@ -19,8 +19,8 @@ logger = get_logger("foxzone.tool.comment", color=COLOR.CYAN)
 
 #: ``QZoneCommentTool.description`` 中拼接给 LLM 的评论硬性约束。
 #:
-#: 这是 Tool 的硬编码"调用合同"（schema 描述），不属于用户可调提示词，
-#: 所以不外置到 ``config.toml``。它**不会**被替换为 ``config.prompts.comment_guidelines``。
+#: 这是 Tool 的硬编码"调用合同"（schema 描述），与 ``prompts.py`` 的
+#: ``COMMENT_GUIDELINES`` 独立维护，不随其替换。
 _TOOL_COMMENT_GUIDELINES: str = (
     "【QZone 评论统一规范（必须严格遵守）】\n"
     "1. 字数严格控制在 30 字以内。\n"

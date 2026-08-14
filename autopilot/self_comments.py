@@ -47,6 +47,7 @@ async def poll_self_comments_once(
         logger.debug("本次轮询未获取到说说。")
         return
 
+    logger.debug(f"评论轮询：获取到 {len(feeds)} 条自己的说说")
     new_items: list[dict[str, Any]] = []
     for feed in feeds:
         feed_id: str = str(feed.get("tid", ""))
@@ -54,7 +55,11 @@ async def poll_self_comments_once(
         comments: list[dict[str, Any]] = feed.get("comments", [])
 
         if not feed_id or not comments:
+            logger.debug(f"评论轮询：跳过 feed（无 tid 或无评论） tid={feed_id} 评论数={len(comments)}")
             continue
+        logger.debug(
+            f"评论轮询：说说 tid={feed_id} 正文={str(feed_content)[:60]!r} 评论数={len(comments)}"
+        )
 
         for comment in comments:
             commenter_qq: str = str(comment.get("qq_account", ""))
@@ -83,6 +88,9 @@ async def poll_self_comments_once(
                         pass  # 格式无法解析时不过滤
 
             if runtime.reply_tracker.has_replied(feed_id, comment_tid):
+                logger.debug(
+                    f"评论轮询：comment {comment_tid} 已被回复过（reply_tracker 命中），跳过"
+                )
                 continue
 
             # 解析父评论上下文（用于支持楼中楼对话链）
@@ -100,6 +108,11 @@ async def poll_self_comments_once(
                         break
             is_reply_to_bot: bool = bool(parent_tid) and parent_commenter_qq == bot_qq
 
+            logger.debug(
+                f"评论轮询：新评论 feed={feed_id} commenter={commenter_qq} "
+                f"内容={str(comment.get('content', ''))[:60]!r} "
+                f"parent_tid={parent_tid!r} is_reply_to_bot={is_reply_to_bot}"
+            )
             new_items.append({
                 "feed_id": feed_id,
                 "feed_content": feed_content,

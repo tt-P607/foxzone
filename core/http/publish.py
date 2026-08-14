@@ -107,6 +107,9 @@ class PublishMixin(QZoneClientBase):
             "format": "json",
             "fupdate": 1,
         }
+        logger.debug(
+            f"like 调用: target_qq={target_qq} feed_id={feed_id}"
+        )
         try:
             resp_text = await self._request(
                 "POST", DOLIKE_URL, params={"g_tk": self._gtk}, data=data
@@ -114,6 +117,7 @@ class PublishMixin(QZoneClientBase):
             try:
                 resp_data = orjson.loads(resp_text)
                 code = resp_data.get("code", -1)
+                logger.debug(f"like 响应: code={code} message={resp_data.get('message')}")
                 if code == 0:
                     return True
                 if code == -3000:

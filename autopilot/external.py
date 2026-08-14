@@ -14,7 +14,6 @@ from typing import Any
 
 from src.app.plugin_system.api.log_api import COLOR, get_logger
 
-from ..core.comment_tree import resolve_root_comment_tid, is_local_seq_tid
 from ..core.interaction_log import ACTION_COMMENT, SOURCE_POLL
 from ..core.llm import log_llm_prompt
 from ..core.text_utils import truncate_preview
@@ -25,7 +24,6 @@ if typing.TYPE_CHECKING:
 
 logger = get_logger("foxzone.autopilot.external", color=COLOR.CYAN)
 
-
 async def external_followup_once(
     runtime: "QZoneRuntime",
     bot_qq: str,
@@ -33,174 +31,161 @@ async def external_followup_once(
     batch_size: int,
     max_feed_age_hours: float = 0,
 ) -> None:
-    """执行一次外部空间评论回查（QQ 聚合版）。
+    """执行一次外部空间评论回查（按 feed 精准查）。
 
-    采用「时间线扫描 + 精准详情」二段式：先用 msglist_v6 快速判断哪些已记录的
-    feed 还在时间线最新 20 条内（cheap），命中后再对每条单独调 msgdetail_v6
-    拿 hex 全局 tid 的完整评论列表（精准），用于可靠地匹配 parent_tid 并提交回复。
+    对 interaction_log 中 bot 评论过的每条 ``(target_qq, feed_id)`` 直接调
+    ``msgdetail_v6`` 拿完整评论区，检查是否存在「别人回复了 bot 评论」的
+    接力回复，命中则交给 :func:`process_reply_batch` 决策并回复。
+    不再按 QQ 扫时间线，也不受「时间线最近 20 条」范围限制。
 
     Args:
         runtime: 插件运行时
         bot_qq: Bot 自己的 QQ
         max_age_hours: 评论过期阈值（小时），0 表示不限制
-        batch_size: 本轮最多检查多少个 QQ；0 表示不限
+        batch_size: 本轮最多检查多少条 feed；0 表示不限
         max_feed_age_hours: 评论过的说说超过此时长（小时）后不再回查；0 表示不限
     """
     interaction_log = runtime.interaction_log
-    qq_targets: list[tuple[str, list[str]]] = interaction_log.iter_followup_qqs(
+    feed_targets: list[tuple[str, str]] = interaction_log.iter_followup_feeds(
         exclude_target_qq=bot_qq,
         limit=batch_size,
         max_feed_age_hours=max_feed_age_hours,
     )
-    if not qq_targets:
-        logger.debug("外部回查：本轮没有待检查的 QQ。")
+    if not feed_targets:
+        logger.debug("外部回查：本轮没有待检查的 feed。")
         return
 
-    total_feeds = sum(len(fids) for _, fids in qq_targets)
     logger.info(
-        f"外部回查：本轮检查 {len(qq_targets)} 个 QQ 共 {total_feeds} 条 feed"
+        f"外部回查：本轮检查 {len(feed_targets)} 条 bot 评论过的说说"
         f"（最久未回查优先）。"
     )
+    for qq, fid in feed_targets:
+        logger.debug(f"外部回查目标: qq={qq} feed_id={fid}")
 
     new_items: list[dict[str, Any]] = []
-    success_qq = 0
-    fail_qq = 0
-    miss_count = 0  # feed 已超出最新 20 条范围，本轮无法命中
+    success_count = 0
+    fail_count = 0
 
     async def _mark_checked(target_qq: str, fid: str) -> None:
         interaction_log.mark_followup_checked(target_qq, fid)
         await interaction_log.save()
 
-    for idx, (target_qq, expected_feed_ids) in enumerate(qq_targets):
-        # QQ 之间加 3-8s 随机抖动，避免短时间集中调用触发风控
+    for idx, (target_qq, feed_id) in enumerate(feed_targets):
+        # feed 之间加 3-8s 随机抖动，避免短时间集中调用触发风控
         if idx > 0:
             jitter = random.uniform(3.0, 8.0)
-            logger.debug(f"外部回查：QQ 间隔抖动 {jitter:.1f}s")
+            logger.debug(f"外部回查：feed 间隔抖动 {jitter:.1f}s")
             await asyncio.sleep(jitter)
 
+        # 无论是否命中，本轮已检查过该 feed → 更新时间戳
+        await _mark_checked(target_qq, feed_id)
+
         try:
-            feeds = await runtime.with_client(
-                lambda client, qq=target_qq: client.list_feeds(
-                    qq, 20, skip_commented=False, paginate_comments=False
+            detail = await runtime.with_client(
+                lambda client, qq=target_qq, fid=feed_id: client.fetch_feed_detail(
+                    host_qq=str(qq), tid=str(fid)
                 )
             )
-        except Exception as e:
-            logger.warning(f"外部回查：拉取 QQ {target_qq} 时间线失败: {e}")
-            for fid in expected_feed_ids:
-                await _mark_checked(target_qq, fid)
-            fail_qq += 1
+        except Exception as exc:
+            logger.warning(f"外部回查：拉取 feed {feed_id} 详情失败: {exc}")
+            fail_count += 1
             continue
 
-        success_qq += 1
-        feeds_by_tid: dict[str, dict[str, Any]] = {
-            str(f.get("tid", "")): f for f in (feeds or []) if f.get("tid")
+        success_count += 1
+        comments: list[dict[str, Any]] = list((detail or {}).get("comments", []) or [])
+        if not comments:
+            logger.debug(f"外部回查：feed {feed_id} 无评论，跳过。")
+            continue
+
+        feed_content = str((detail or {}).get("content", "") or "")
+        feed_images = list((detail or {}).get("images", []) or [])
+        story_time = str((detail or {}).get("created_time", "") or "")
+
+        bot_comment_tids: set[str] = {
+            str(c.get("comment_tid", ""))
+            for c in comments
+            if str(c.get("qq_account", "")) == bot_qq and c.get("comment_tid")
         }
+        logger.debug(
+            f"外部回查：feed {feed_id} 评论总数={len(comments)}，"
+            f"bot 自己的评论 tid={sorted(bot_comment_tids)}"
+        )
+        if not bot_comment_tids:
+            continue
 
-        # 无论是否命中，本轮已检查过这些 feed → 更新时间戳
-        for fid in expected_feed_ids:
-            await _mark_checked(target_qq, fid)
-
-        for feed_id in expected_feed_ids:
-            feed = feeds_by_tid.get(str(feed_id))
-            if feed is None:
-                miss_count += 1
+        for comment in comments:
+            commenter_qq: str = str(comment.get("qq_account", ""))
+            if commenter_qq == bot_qq:
                 continue
 
-            # 精准模式：命中 feed 后单独调 msgdetail_v6 拿 hex 全局 tid 的完整评论列表，
-            # 替换 msglist_v6 内嵌的局部序号 commentlist。
-            try:
-                detail = await runtime.with_client(
-                    lambda client, qq=target_qq, fid=feed_id: client.fetch_feed_detail(
-                        host_qq=str(qq), tid=str(fid)
-                    )
-                )
-            except Exception as exc:
-                logger.warning(f"外部回查：拉取 feed {feed_id} 详情失败: {exc}")
-                detail = None
-
-            detailed = list((detail or {}).get("comments", []) or [])
-            comments: list[dict[str, Any]] = (
-                detailed if detailed else list(feed.get("comments", []) or [])
-            )
-            if not comments:
+            comment_tid: str = str(comment.get("comment_tid", ""))
+            if not comment_tid:
                 continue
 
-            bot_comment_tids: set[str] = {
-                str(c.get("comment_tid", ""))
-                for c in comments
-                if str(c.get("qq_account", "")) == bot_qq and c.get("comment_tid")
-            }
-            if not bot_comment_tids:
+            parent_tid_raw = comment.get("parent_tid")
+            parent_tid: str = str(parent_tid_raw).strip() if parent_tid_raw else ""
+            if parent_tid not in bot_comment_tids:
                 continue
 
-            for comment in comments:
-                commenter_qq: str = str(comment.get("qq_account", ""))
-                if commenter_qq == bot_qq:
-                    continue
-
-                comment_tid: str = str(comment.get("comment_tid", ""))
-                if not comment_tid:
-                    continue
-
-                parent_tid_raw = comment.get("parent_tid")
-                parent_tid: str = str(parent_tid_raw).strip() if parent_tid_raw else ""
-                if parent_tid not in bot_comment_tids:
-                    continue
-
-                if max_age_hours > 0:
-                    create_time_str = str(comment.get("create_time", ""))
-                    if create_time_str:
-                        try:
-                            comment_dt = datetime.strptime(
-                                create_time_str, "%Y-%m-%d %H:%M:%S"
+            if max_age_hours > 0:
+                create_time_str = str(comment.get("create_time", ""))
+                if create_time_str:
+                    try:
+                        comment_dt = datetime.strptime(
+                            create_time_str, "%Y-%m-%d %H:%M:%S"
+                        )
+                        age_hours = (
+                            datetime.now() - comment_dt
+                        ).total_seconds() / 3600
+                        if age_hours > max_age_hours:
+                            logger.debug(
+                                f"外部回查跳过过期回复 {comment_tid}"
+                                f"（{create_time_str}，"
+                                f"{age_hours:.1f}h > {max_age_hours}h）"
                             )
-                            age_hours = (
-                                datetime.now() - comment_dt
-                            ).total_seconds() / 3600
-                            if age_hours > max_age_hours:
-                                logger.debug(
-                                    f"外部回查跳过过期回复 {comment_tid}"
-                                    f"（{create_time_str}，"
-                                    f"{age_hours:.1f}h > {max_age_hours}h）"
-                                )
-                                continue
-                        except ValueError:
-                            pass
+                            continue
+                    except ValueError:
+                        pass
 
-                if runtime.reply_tracker.has_replied(feed_id, comment_tid):
-                    continue
+            if runtime.reply_tracker.has_replied(feed_id, comment_tid):
+                logger.debug(
+                    f"外部回查：comment {comment_tid} 已被回复过（reply_tracker 命中），跳过"
+                )
+                continue
 
-                parent_content: str = ""
-                parent_commenter_name: str = ""
-                for _c in comments:
-                    if str(_c.get("comment_tid", "")) == parent_tid:
-                        parent_content = str(_c.get("content", "") or "")
-                        parent_commenter_name = str(_c.get("nickname", "") or "")
-                        break
+            parent_content: str = ""
+            parent_commenter_name: str = ""
+            for _c in comments:
+                if str(_c.get("comment_tid", "")) == parent_tid:
+                    parent_content = str(_c.get("content", "") or "")
+                    parent_commenter_name = str(_c.get("nickname", "") or "")
+                    break
 
-                new_items.append({
-                    "feed_id": feed_id,
-                    "feed_content": str(feed.get("content", "") or ""),
-                    "feed_images": list(feed.get("images", []) or []),
-                    "story_time": str(feed.get("created_time", "") or ""),
-                    "all_comments": comments,
-                    "comment_tid": comment_tid,
-                    "comment_content": comment.get("content", ""),
-                    "comment_time": comment.get("create_time", ""),
-                    "commenter_name": comment.get("nickname", ""),
-                    "commenter_qq": commenter_qq,
-                    "parent_tid": parent_tid,
-                    "parent_content": parent_content,
-                    "parent_commenter_qq": bot_qq,
-                    "parent_commenter_name": parent_commenter_name,
-                    "is_reply_to_bot": True,
-                    "host_qq": target_qq,
-                })
+            new_items.append({
+                "feed_id": feed_id,
+                "feed_content": feed_content,
+                "feed_images": feed_images,
+                "story_time": story_time,
+                "all_comments": comments,
+                "comment_tid": comment_tid,
+                "comment_content": comment.get("content", ""),
+                "comment_time": comment.get("create_time", ""),
+                "commenter_name": comment.get("nickname", ""),
+                "commenter_qq": commenter_qq,
+                "parent_tid": parent_tid,
+                "parent_content": parent_content,
+                "parent_commenter_qq": bot_qq,
+                "parent_commenter_name": parent_commenter_name,
+                "is_reply_to_bot": True,
+                "host_qq": target_qq,
+            })
+            logger.debug(
+                f"外部回查：发现接力回复 feed={feed_id} "
+                f"commenter={commenter_qq} 内容={str(comment.get('content', ''))[:60]!r} "
+                f"parent_tid={parent_tid} comment_tid={comment_tid}"
+            )
 
-    summary = (
-        f"成功 {success_qq}/失败 {fail_qq} QQ，"
-        f"miss {miss_count}（超 20 条范围）"
-    )
+    summary = f"成功 {success_count}/失败 {fail_count} feed"
     if not new_items:
         logger.info(f"外部回查：{summary}，本轮没有新发现的接力回复。")
         return
@@ -273,6 +258,11 @@ async def process_reply_batch(
         for d in decisions
         if d.get("comment_tid")
     }
+    for d in decisions:
+        logger.debug(
+            f"评论回复决策明细: comment_tid={d.get('comment_tid')} "
+            f"feed_id={d.get('feed_id')} reply={str(d.get('reply'))[:60]!r}"
+        )
 
     decision_lines: list[str] = []
     for item in comment_items:
@@ -298,32 +288,25 @@ async def process_reply_batch(
             return False
         if not decision_map.get(comment_tid):
             return False
-        # 预检：resolve 退化为局部序号说明 all_comments 缺一级父节点，
-        # 强行 reply 必触发 -10049，直接跳过避免污染风控状态。
-        root_tid = resolve_root_comment_tid(
-            item.get("all_comments") or [], comment_tid
-        )
-        if is_local_seq_tid(root_tid):
-            logger.warning(
-                f"resolve 退化为局部序号 root_tid={root_tid!r}，"
-                f"all_comments 缺一级父节点，跳过 "
-                f"(feed_id={feed_id}, comment_tid={comment_tid})"
-            )
-            return False
+        # commentId 直接取被回复子评论的 parent_tid（即顶层一级评论 tid）。
+        # msgdetail_v6 返回的一级/二级评论 tid 均为该说说内的数字局部序号
+        # （如 "1"），数字 tid 作为 commentId 提交 reply 可正常成功
+        # （服务端按 topicId+commentId 定位）。
         return True
 
     async def _sender(item: dict[str, Any]) -> bool:
         comment_tid = str(item.get("comment_tid", ""))
         feed_id = str(item.get("feed_id", ""))
         reply_text = decision_map.get(comment_tid) or ""
-        root_comment_tid = resolve_root_comment_tid(
-            item.get("all_comments") or [], comment_tid
-        )
-        _all_c = item.get("all_comments") or []
+        # commentId = 被回复子评论所属的顶层一级评论 tid。
+        # msgdetail_v6 中子回复的 parent_tid 字段即顶层一级评论 tid
+        # （顶层 tid 在顶层内唯一，子回复一律挂在某条顶层下），直接使用
+        # 该字段即可，无需按 tid 溯源——全量溯源会因「子回复 tid 与一级
+        # tid 从 1 各自编号、跨层级冲突」而解析到错误的评论。
+        root_comment_tid = str(item.get("parent_tid", "") or "")
         logger.debug(
-            f"reply 前 all_comments 摘要: total={len(_all_c)} "
-            f"target={comment_tid!r} parent={item.get('parent_tid')!r} "
-            f"resolved_root={root_comment_tid!r}"
+            f"reply 前: target={comment_tid!r} parent_tid={root_comment_tid!r} "
+            f"(commentId 直接用父级 tid)"
         )
         return await runtime.with_client(
             lambda client: client.reply(

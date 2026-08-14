@@ -16,6 +16,7 @@ def format_batch_comment_items(
     comment_items: list[dict[str, Any]],
     bot_qq: str,
     image_descs: dict[str, str] | None = None,
+    multimodal: bool = False,
 ) -> str:
     """将批量评论项格式化为提示词文本块（楼中楼对话链视图）。
 
@@ -23,6 +24,8 @@ def format_batch_comment_items(
         comment_items: 评论项列表
         bot_qq: Bot 的 QQ 号，用于在评论区中高亮 Bot 自己的发言
         image_descs: 说说配图 URL → 视觉描述映射；缺失则按"[图片]"占位
+        multimodal: 多模态模式下为 True，此时图片以 ``[[IMG:i:j]]`` 标记占位，
+            由调用方内联为 Image 内容
 
     Returns:
         格式化后的多评论描述文本
@@ -46,10 +49,13 @@ def format_batch_comment_items(
             all_comments, bot_qq=bot_qq, highlight_tid=comment_tid
         )
 
-        image_lines: list[str] = []
-        for j, url in enumerate(feed_images, 1):
-            desc = descs.get(url, "")
-            image_lines.append(f"图片{j}：{desc if desc else '[图片]'}")
+        if multimodal:
+            image_lines = [f"[[IMG:{index}:{j}]]" for j in range(1, len(feed_images) + 1)]
+        else:
+            image_lines = [
+                f"图片{j}：{descs.get(url, '[图片]')}"
+                for j, url in enumerate(feed_images, 1)
+            ]
         image_block_text = ("\n" + "\n".join(image_lines)) if image_lines else ""
 
         # 当前评论的语境标识
@@ -78,11 +84,15 @@ def format_batch_comment_items(
     return "\n\n".join(blocks)
 
 
-def format_feed_items_block(feed_items: list[dict[str, Any]]) -> str:
+def format_feed_items_block(
+    feed_items: list[dict[str, Any]], multimodal: bool = False
+) -> str:
     """将好友说说列表格式化为提示词文本块。
 
     Args:
         feed_items: 说说项列表
+        multimodal: 多模态模式下为 True，此时图片以 ``[[IMG:i:j]]`` 标记占位，
+            由调用方内联为 Image 内容；否则使用 ``image_text``（VLM 识别描述）
 
     Returns:
         格式化后的多说说描述文本
@@ -103,7 +113,11 @@ def format_feed_items_block(feed_items: list[dict[str, Any]]) -> str:
             f"状态：尚未点赞\n"
             f"正文：「{content[:200]}{'…' if len(content) > 200 else ''}」\n"
         )
-        if image_text:
+        if multimodal:
+            images = [str(u) for u in item.get("images", []) if u]
+            for j in range(1, len(images) + 1):
+                block += f"[[IMG:{i}:{j}]]\n"
+        elif image_text:
             block += f"{image_text}\n"
         if comment_count:
             block += f"当前评论数：{comment_count}\n"
