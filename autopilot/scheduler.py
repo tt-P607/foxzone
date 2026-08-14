@@ -65,7 +65,7 @@ class Autopilot:
                         lambda bq: poll_self_comments_once(
                             self._runtime,
                             bq,
-                            max(1, cfg.monitor.comment_poll_num_feeds),
+                            5,
                             cfg.monitor.max_comment_age_hours,
                         )
                     ),

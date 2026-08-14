@@ -48,10 +48,6 @@ class FoxZoneConfig(BaseConfig):
 
         enable_auto_monitor: bool = Field(default=True, description="是否启用自动监控好友动态")
         interval_minutes: int = Field(default=10, description="评论回复轮询间隔（分钟）")
-        comment_poll_num_feeds: int = Field(
-            default=10,
-            description="评论回复轮询每次检查的自己说说数量",
-        )
         enable_auto_reply: bool = Field(default=True, description="是否自动回复自己说说下的评论")
         enable_external_followup: bool = Field(
             default=False,
