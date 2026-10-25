@@ -15,7 +15,41 @@ QZone 评论区是两层结构：顶层一级评论 + list_3 楼中楼子回复�
 from __future__ import annotations
 
 import re
+import json
 from typing import Any
+
+
+def opaque_id(value: Any) -> str:
+    """将不透明标识规范为字符串，保留数值零。"""
+    return "" if value is None else str(value)
+
+
+def _first_id(comment: dict[str, Any], *keys: str) -> str:
+    """按顺序读取第一个非空的不透明标识。"""
+    for key in keys:
+        value = opaque_id(comment.get(key))
+        if value:
+            return value
+    return ""
+
+
+def _comment_author(comment: dict[str, Any]) -> str:
+    """读取评论作者的账号标识，不用昵称推断身份。"""
+    return _first_id(comment, "qq_account", "commenter_qq", "comment_uin", "uin")
+
+
+def comment_identity(comment: dict[str, Any]) -> str:
+    """生成包含父评论和作者作用域的稳定本地评论身份。"""
+    parent_id = _first_id(comment, "parent_comment_id", "parent_tid", "parent_id")
+    parent_uin = _first_id(
+        comment, "parent_comment_uin", "parent_commenter_qq", "parent_uin"
+    )
+    comment_id = _first_id(comment, "comment_id", "comment_tid", "tid")
+    return json.dumps(
+        [parent_id, parent_uin, comment_id, _comment_author(comment)],
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
 
 
 def _build_top_index(
@@ -31,19 +65,93 @@ def _build_top_index(
     """
     top_by_tid: dict[str, dict[str, Any]] = {}
     for c in comments:
-        parent = str(c.get("parent_tid") or "").strip()
+        parent = _first_id(c, "parent_comment_id", "parent_tid", "parent_id")
         if parent:
             continue
-        ctid = str(c.get("comment_tid") or "").strip()
+        ctid = _first_id(c, "comment_id", "comment_tid", "tid")
         if ctid and ctid not in top_by_tid:
             top_by_tid[ctid] = c
     return top_by_tid
+
+
+def reply_target(
+    comment: dict[str, Any], comments: list[dict[str, Any]]
+) -> tuple[str, str] | None:
+    """返回回复所需父评论 ID 与作者，不把子评论误作父评论。
+
+    一级评论以自身 ID 和作者作为目标；子评论必须通过显式父信息或仅含
+    一级评论的索引解析父目标。
+    """
+    own_id = _first_id(comment, "comment_id", "comment_tid", "tid")
+    parent_id = _first_id(comment, "parent_comment_id", "parent_tid", "parent_id")
+    if not parent_id:
+        author = _comment_author(comment)
+        return (own_id, author) if own_id and author else None
+
+    parent_uin = _first_id(
+        comment, "parent_comment_uin", "parent_commenter_qq", "parent_uin"
+    )
+    parent = _build_top_index(comments).get(parent_id)
+    if parent is not None:
+        author = _comment_author(parent)
+        if parent_uin and author and parent_uin != author:
+            return None
+        resolved_author = parent_uin or author
+        return (parent_id, resolved_author) if resolved_author else None
+    if parent_uin:
+        return parent_id, parent_uin
+    return None
+
+
+def resolve_comment(
+    comments: list[dict[str, Any]],
+    comment_id: str,
+    *,
+    parent_comment_id: str = "",
+    comment_uin: str = "",
+    parent_comment_uin: str = "",
+) -> dict[str, Any] | None:
+    """仅在所有给定身份字段唯一匹配时返回评论。"""
+    wanted_id = opaque_id(comment_id)
+    wanted_parent = opaque_id(parent_comment_id)
+    wanted_author = opaque_id(comment_uin)
+    wanted_parent_author = opaque_id(parent_comment_uin)
+    matches = []
+    for comment in comments:
+        if _first_id(comment, "comment_id", "comment_tid", "tid") != wanted_id:
+            continue
+        parent_id = _first_id(comment, "parent_comment_id", "parent_tid", "parent_id")
+        parent_author = _first_id(
+            comment, "parent_comment_uin", "parent_commenter_qq", "parent_uin"
+        )
+        if wanted_parent and parent_id != wanted_parent:
+            continue
+        if wanted_author and _comment_author(comment) != wanted_author:
+            continue
+        if wanted_parent_author and parent_author != wanted_parent_author:
+            continue
+        matches.append(comment)
+    return matches[0] if len(matches) == 1 else None
+
+
+def reply_item_key(item: dict[str, Any]) -> str:
+    """生成批量回复的稳定决策键：主人、说说和评论身份。"""
+    return json.dumps(
+        [
+            opaque_id(item.get("host_qq")),
+            opaque_id(item.get("feed_id")),
+            comment_identity(item),
+        ],
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
 
 
 def build_threaded_view(
     comments: list[dict[str, Any]],
     bot_qq: str | None,
     highlight_tid: str = "",
+    highlight_identity: str = "",
 ) -> str:
     """以楼中楼结构格式化评论区。
 
@@ -66,7 +174,7 @@ def build_threaded_view(
     top_levels: list[dict[str, Any]] = []
     children_map: dict[str, list[dict[str, Any]]] = {}
     for c in comments:
-        parent = str(c.get("parent_tid") or "").strip()
+        parent = _first_id(c, "parent_comment_id", "parent_tid", "parent_id")
         if not parent:
             top_levels.append(c)
             continue
@@ -77,7 +185,9 @@ def build_threaded_view(
             top_levels.append(c)
 
     def _render(c: dict[str, Any], indent: str) -> str:
-        tid = str(c.get("comment_tid", ""))
+        tid = _first_id(c, "comment_id", "comment_tid", "tid")
+        parent_id = _first_id(c, "parent_comment_id", "parent_tid", "parent_id")
+        author_id = _comment_author(c)
         nickname = str(c.get("nickname", "未知"))
         content = str(c.get("content", ""))
         time_str = str(c.get("create_time", ""))
@@ -88,13 +198,21 @@ def build_threaded_view(
         else:
             display_name = nickname
 
-        marker = ">>> " if highlight_tid and tid == highlight_tid else ""
-        return f"{indent}{marker}[{time_str}] {display_name}：{content}"
+        marker = (
+            ">>> "
+            if highlight_identity and comment_identity(c) == highlight_identity
+            or highlight_tid and tid == highlight_tid and not highlight_identity
+            else ""
+        )
+        return (
+            f"{indent}{marker}[id={tid or '?'} parent={parent_id or '-'} "
+            f"author={author_id or '?'}] [{time_str}] {display_name}：{content}"
+        )
 
     lines: list[str] = []
     for top in top_levels:
         lines.append(_render(top, indent="· "))
-        top_tid = str(top.get("comment_tid", ""))
+        top_tid = _first_id(top, "comment_id", "comment_tid", "tid")
         for child in children_map.get(top_tid, []):
             lines.append(_render(child, indent="    └─ "))
 

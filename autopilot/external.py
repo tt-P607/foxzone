@@ -14,6 +14,7 @@ from typing import Any
 
 from src.app.plugin_system.api.log_api import COLOR, get_logger
 
+from ..core.comment_tree import comment_identity, reply_item_key, reply_target
 from ..core.interaction_log import ACTION_COMMENT, SOURCE_POLL
 from ..core.llm import log_llm_prompt
 from ..core.text_utils import truncate_preview
@@ -34,7 +35,7 @@ async def external_followup_once(
     """执行一次外部空间评论回查（按 feed 精准查）。
 
     对 interaction_log 中 bot 评论过的每条 ``(target_qq, feed_id)`` 直接调
-    ``msgdetail_v6`` 拿完整评论区，检查是否存在「别人回复了 bot 评论」的
+    ``msgdetail_v6`` 分页读取可见评论，检查是否存在「别人回复了 bot 评论」的
     接力回复，命中则交给 :func:`process_reply_batch` 决策并回复。
     不再按 QQ 扫时间线，也不受「时间线最近 20 条」范围限制。
 
@@ -65,6 +66,7 @@ async def external_followup_once(
     new_items: list[dict[str, Any]] = []
     success_count = 0
     fail_count = 0
+    account_qq = str(await runtime.bot_qq())
 
     async def _mark_checked(target_qq: str, fid: str) -> None:
         interaction_log.mark_followup_checked(target_qq, fid)
@@ -102,9 +104,11 @@ async def external_followup_once(
         story_time = str((detail or {}).get("created_time", "") or "")
 
         bot_comment_tids: set[str] = {
-            str(c.get("comment_tid", ""))
+            str(c.get("comment_tid", "") if c.get("comment_tid") is not None else "")
             for c in comments
-            if str(c.get("qq_account", "")) == bot_qq and c.get("comment_tid")
+            if c.get("parent_tid") in (None, "")
+            and str(c.get("qq_account", "")) == bot_qq
+            and c.get("comment_tid") is not None
         }
         logger.debug(
             f"外部回查：feed {feed_id} 评论总数={len(comments)}，"
@@ -118,13 +122,18 @@ async def external_followup_once(
             if commenter_qq == bot_qq:
                 continue
 
-            comment_tid: str = str(comment.get("comment_tid", ""))
-            if not comment_tid:
+            comment_tid = str(comment.get("comment_tid", "") if comment.get("comment_tid") is not None else "")
+            target = reply_target(comment, comments)
+            if not comment_tid or target is None:
                 continue
 
-            parent_tid_raw = comment.get("parent_tid")
-            parent_tid: str = str(parent_tid_raw).strip() if parent_tid_raw else ""
-            if parent_tid not in bot_comment_tids:
+            parent_comment_id, parent_comment_uin = target
+            parent_tid = str(comment.get("parent_tid", "") if comment.get("parent_tid") is not None else "")
+            if (
+                not parent_tid
+                or parent_comment_id not in bot_comment_tids
+                or parent_comment_uin != bot_qq
+            ):
                 continue
 
             if max_age_hours > 0:
@@ -147,7 +156,15 @@ async def external_followup_once(
                     except ValueError:
                         pass
 
-            if runtime.reply_tracker.has_replied(feed_id, comment_tid):
+            if runtime.reply_tracker.is_blocked(
+                feed_id,
+                comment_tid,
+                account_qq=account_qq,
+                host_qq=target_qq,
+                parent_comment_id=parent_comment_id,
+                parent_comment_uin=parent_comment_uin,
+                comment_uin=commenter_qq,
+            ):
                 logger.debug(
                     f"外部回查：comment {comment_tid} 已被回复过（reply_tracker 命中），跳过"
                 )
@@ -156,29 +173,41 @@ async def external_followup_once(
             parent_content: str = ""
             parent_commenter_name: str = ""
             for _c in comments:
-                if str(_c.get("comment_tid", "")) == parent_tid:
+                if (
+                    _c.get("parent_tid") in (None, "")
+                    and str(_c.get("comment_tid", "") if _c.get("comment_tid") is not None else "") == parent_tid
+                ):
                     parent_content = str(_c.get("content", "") or "")
                     parent_commenter_name = str(_c.get("nickname", "") or "")
                     break
 
-            new_items.append({
+            item = {
                 "feed_id": feed_id,
                 "feed_content": feed_content,
+                "content_complete": (detail or {}).get("content_complete"),
+                "comment_count": (detail or {}).get("comment_count"),
+                "comments_complete": (detail or {}).get("comments_complete", False),
+                "inline_replies_complete": (detail or {}).get("inline_replies_complete", False),
                 "feed_images": feed_images,
                 "story_time": story_time,
                 "all_comments": comments,
                 "comment_tid": comment_tid,
+                "comment_identity": comment_identity(comment),
                 "comment_content": comment.get("content", ""),
                 "comment_time": comment.get("create_time", ""),
                 "commenter_name": comment.get("nickname", ""),
                 "commenter_qq": commenter_qq,
                 "parent_tid": parent_tid,
+                "parent_comment_id": parent_comment_id,
+                "parent_comment_uin": parent_comment_uin,
                 "parent_content": parent_content,
                 "parent_commenter_qq": bot_qq,
                 "parent_commenter_name": parent_commenter_name,
                 "is_reply_to_bot": True,
                 "host_qq": target_qq,
-            })
+            }
+            item["target_key"] = reply_item_key(item)
+            new_items.append(item)
             logger.debug(
                 f"外部回查：发现接力回复 feed={feed_id} "
                 f"commenter={commenter_qq} 内容={str(comment.get('content', ''))[:60]!r} "
@@ -213,10 +242,15 @@ async def process_reply_batch(
             ``feed_id, comment_tid, host_qq, commenter_qq, commenter_name`` 等字段
 
     Returns:
-        ``{"replied": int, "skipped": int, "decisions": dict[str, str | None]}``
+        ``{"replied": int, "skipped": int, "unknown": int,
+        "decisions": dict[str, str | None]}``
     """
     if not comment_items:
-        return {"replied": 0, "skipped": 0, "decisions": {}}
+        return {"replied": 0, "skipped": 0, "unknown": 0, "decisions": {}}
+
+    account_qq = str(await runtime.bot_qq())
+    for item in comment_items:
+        item["target_key"] = reply_item_key(item)
 
     cfg = runtime.config
 
@@ -245,30 +279,30 @@ async def process_reply_batch(
         blocked_count = len(blocked)
         comment_items = filtered
         if not comment_items:
-            return {"replied": 0, "skipped": blocked_count, "decisions": {}}
+            return {"replied": 0, "skipped": blocked_count, "unknown": 0, "decisions": {}}
 
     try:
         decisions = await runtime.content.generate_batch_replies(comment_items)
     except Exception as exc:
         logger.error(f"评论回复批量决策失败: {exc}")
-        return {"replied": 0, "skipped": blocked_count, "decisions": {}}
+        return {"replied": 0, "skipped": blocked_count, "unknown": 0, "decisions": {}}
 
     decision_map: dict[str, str | None] = {
-        d["comment_tid"]: d.get("reply")
+        d["target_key"]: d.get("reply")
         for d in decisions
-        if d.get("comment_tid")
+        if d.get("target_key")
     }
     for d in decisions:
         logger.debug(
-            f"评论回复决策明细: comment_tid={d.get('comment_tid')} "
+            f"评论回复决策明细: target_key={d.get('target_key')} "
             f"feed_id={d.get('feed_id')} reply={str(d.get('reply'))[:60]!r}"
         )
 
     decision_lines: list[str] = []
     for item in comment_items:
-        ctid = item.get("comment_tid", "")
+        target_key = str(item.get("target_key", ""))
         who = item.get("commenter_name", "?")
-        reply = decision_map.get(ctid)
+        reply = decision_map.get(target_key)
         decision_lines.append(f"{'✓' if reply else '✗'} [{who}] → {reply or '跳过'}")
     log_llm_prompt(
         "评论回复决策",
@@ -284,45 +318,47 @@ async def process_reply_batch(
         comment_tid = str(item.get("comment_tid", ""))
         feed_id = str(item.get("feed_id", ""))
         host_qq = str(item.get("host_qq", ""))
-        if not (comment_tid and feed_id and host_qq):
+        target_key = str(item.get("target_key", ""))
+        if not (comment_tid and feed_id and host_qq and target_key):
             return False
-        if not decision_map.get(comment_tid):
+        if not decision_map.get(target_key):
             return False
-        # commentId 直接取被回复子评论的 parent_tid（即顶层一级评论 tid）。
-        # msgdetail_v6 返回的一级/二级评论 tid 均为该说说内的数字局部序号
-        # （如 "1"），数字 tid 作为 commentId 提交 reply 可正常成功
-        # （服务端按 topicId+commentId 定位）。
-        return True
+        return not runtime.reply_tracker.is_blocked(
+            feed_id,
+            comment_tid,
+            account_qq=account_qq,
+            host_qq=host_qq,
+            parent_comment_id=str(item.get("parent_comment_id", "")),
+            parent_comment_uin=str(item.get("parent_comment_uin", "")),
+            comment_uin=str(item.get("commenter_qq", "")),
+        )
 
     async def _sender(item: dict[str, Any]) -> bool:
         comment_tid = str(item.get("comment_tid", ""))
         feed_id = str(item.get("feed_id", ""))
-        reply_text = decision_map.get(comment_tid) or ""
-        # commentId = 被回复子评论所属的顶层一级评论 tid。
-        # msgdetail_v6 中子回复的 parent_tid 字段即顶层一级评论 tid
-        # （顶层 tid 在顶层内唯一，子回复一律挂在某条顶层下），直接使用
-        # 该字段即可，无需按 tid 溯源——全量溯源会因「子回复 tid 与一级
-        # tid 从 1 各自编号、跨层级冲突」而解析到错误的评论。
-        root_comment_tid = str(item.get("parent_tid", "") or "")
+        reply_text = decision_map.get(str(item.get("target_key", ""))) or ""
+        parent_comment_id = str(item.get("parent_comment_id", ""))
+        parent_comment_uin = str(item.get("parent_comment_uin", ""))
         logger.debug(
-            f"reply 前: target={comment_tid!r} parent_tid={root_comment_tid!r} "
-            f"(commentId 直接用父级 tid)"
+            f"reply 前: target={comment_tid!r} parent_id={parent_comment_id!r}"
         )
-        return await runtime.with_client(
+        result = await runtime.with_client(
             lambda client: client.reply(
                 feed_id,
                 str(item.get("host_qq", "")),
                 str(item.get("commenter_name", "未知用户")),
                 reply_text.strip(),
-                root_comment_tid,
+                parent_comment_id,
                 str(item.get("commenter_qq", "")),
+                parent_comment_uin=parent_comment_uin,
             )
         )
+        return bool(result)
 
     async def _on_success(item: dict[str, Any]) -> None:
         host_qq = str(item.get("host_qq", ""))
         feed_id = str(item.get("feed_id", ""))
-        reply_text = decision_map.get(str(item.get("comment_tid", "")))
+        reply_text = decision_map.get(str(item.get("target_key", "")))
         feed_preview = truncate_preview(str(item.get("feed_content", "") or "（无正文）"))
         commenter = item.get("commenter_name", "未知用户")
         logger.info(
@@ -330,6 +366,15 @@ async def process_reply_batch(
             f"[/#CBA6F7] 的说说「[#CBA6F7]{feed_preview}[/#CBA6F7]」"
             f" 下回复 [#CBA6F7]{commenter}[/#CBA6F7]"
             f" → 「{reply_text}」[/#F38BA8]"
+        )
+        await runtime.reply_tracker.mark_as_replied(
+            feed_id,
+            str(item.get("comment_tid", "")),
+            account_qq=account_qq,
+            host_qq=host_qq,
+            parent_comment_id=str(item.get("parent_comment_id", "")),
+            parent_comment_uin=str(item.get("parent_comment_uin", "")),
+            comment_uin=str(item.get("commenter_qq", "")),
         )
         # 续期 last_ts，避免持续对话中的 feed 被 max_feed_age_hours 过滤掉
         runtime.interaction_log.mark(host_qq, feed_id, ACTION_COMMENT, SOURCE_POLL)
@@ -345,10 +390,29 @@ async def process_reply_batch(
             )
 
     async def _on_finally(item: dict[str, Any]) -> None:
-        feed_id = str(item.get("feed_id", ""))
-        comment_tid = str(item.get("comment_tid", ""))
-        if feed_id and comment_tid:
-            await runtime.reply_tracker.mark_as_replied(feed_id, comment_tid)
+        target_key = str(item.get("target_key", ""))
+        if target_key not in decision_map or decision_map[target_key]:
+            return
+        await runtime.reply_tracker.mark_skipped(
+            str(item.get("feed_id", "")),
+            str(item.get("comment_tid", "")),
+            account_qq=account_qq,
+            host_qq=str(item.get("host_qq", "")),
+            parent_comment_id=str(item.get("parent_comment_id", "")),
+            parent_comment_uin=str(item.get("parent_comment_uin", "")),
+            comment_uin=str(item.get("commenter_qq", "")),
+        )
+
+    async def _on_unknown(item: dict[str, Any]) -> None:
+        await runtime.reply_tracker.mark_pending(
+            str(item.get("feed_id", "")),
+            str(item.get("comment_tid", "")),
+            account_qq=account_qq,
+            host_qq=str(item.get("host_qq", "")),
+            parent_comment_id=str(item.get("parent_comment_id", "")),
+            parent_comment_uin=str(item.get("parent_comment_uin", "")),
+            comment_uin=str(item.get("commenter_qq", "")),
+        )
 
     def _label(item: dict[str, Any]) -> str:
         return (
@@ -362,16 +426,18 @@ async def process_reply_batch(
         should_send=_should_send,
         label=_label,
         on_success=_on_success,
-        on_rate_limited=_on_finally,  # 限流也标记已处理，避免下轮重复触发
         on_finally=_on_finally,
+        on_unknown=_on_unknown,
     )
 
     logger.info(
         f"评论回复批量处理完成：共 {len(comment_items)} 条，"
-        f"回复 {result.succeeded} 条，跳过 {result.skipped} 条。"
+        f"回复 {result.succeeded} 条，跳过 {result.skipped} 条，"
+        f"结果未知 {result.unknown} 条。"
     )
     return {
         "replied": result.succeeded,
         "skipped": result.skipped + blocked_count,
+        "unknown": result.unknown,
         "decisions": decision_map,
     }

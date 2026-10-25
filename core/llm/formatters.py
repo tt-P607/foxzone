@@ -8,8 +8,53 @@ from __future__ import annotations
 
 from typing import Any
 
-from ..comment_tree import build_threaded_view
+from ..comment_tree import comment_identity
 from .personality import format_story_time
+
+
+def _format_comments(
+    comments: list[dict[str, Any]],
+    bot_qq: str = "",
+    highlight_identity: str = "",
+) -> str:
+    """按可见列表顺序展示评论序号及完整身份字段。"""
+    if not comments:
+        return "暂无评论"
+    lines: list[str] = []
+    for index, comment in enumerate(comments, start=1):
+        comment_id = comment.get("comment_id", comment.get("comment_tid", comment.get("tid")))
+        parent_id = comment.get(
+            "parent_comment_id", comment.get("parent_tid", comment.get("parent_id"))
+        )
+        author = comment.get(
+            "qq_account", comment.get("commenter_qq", comment.get("comment_uin"))
+        )
+        parent_author = comment.get(
+            "parent_comment_uin",
+            comment.get("parent_commenter_qq", comment.get("parent_uin")),
+        )
+        nickname = str(comment.get("nickname") or "未知用户")
+        if bot_qq and str(author) == str(bot_qq):
+            nickname = "你（自己）"
+        marker = " >>>" if highlight_identity and comment_identity(comment) == highlight_identity else ""
+        content = str(comment.get("content") or "（无内容）")
+        lines.append(
+            f"  {index}.{marker} id={comment_id if comment_id is not None else '?'} "
+            f"parent={parent_id if parent_id is not None else '-'} "
+            f"author={author if author is not None else '?'} "
+            f"parent_author={parent_author if parent_author is not None else '-'} "
+            f"[{nickname}]：{content}"
+        )
+    return "\n".join(lines)
+
+
+def _content_completeness(value: Any) -> str:
+    """描述正文是否完整，避免把未知或折叠内容误当全文。"""
+    if value is True:
+        return "完整"
+    if value is False:
+        return "可能为折叠片段"
+    return "未知（保留当前返回正文，不截断）"
 
 
 def format_batch_comment_items(
@@ -34,20 +79,18 @@ def format_batch_comment_items(
     blocks: list[str] = []
     for index, item in enumerate(comment_items, start=1):
         feed_id = item.get("feed_id", "")
-        feed_content = item.get("feed_content", "（无说说内容）").strip()
+        feed_content = str(item.get("feed_content") or "（无说说内容）").strip()
         story_time = format_story_time(item.get("story_time")) or "未知时间"
-        comment_tid = str(item.get("comment_tid", ""))
-        comment_content = item.get("comment_content", "").strip()
+        comment_content = str(item.get("comment_content") or "（无内容）").strip()
         commenter_name = item.get("commenter_name", "未知用户")
         comment_time = format_story_time(item.get("comment_time")) or "未知时间"
-        all_comments: list[dict[str, Any]] = item.get("all_comments", [])
-        feed_images: list[str] = [str(u) for u in item.get("feed_images", []) if u]
+        all_comments: list[dict[str, Any]] = item.get("all_comments") or []
+        feed_images: list[str] = [str(u) for u in item.get("feed_images") or [] if u]
         is_reply_to_bot: bool = bool(item.get("is_reply_to_bot"))
-        parent_content: str = str(item.get("parent_content", "")).strip()
+        parent_content: str = str(item.get("parent_content") or "").strip()
 
-        threaded = build_threaded_view(
-            all_comments, bot_qq=bot_qq, highlight_tid=comment_tid
-        )
+        highlighted_identity = str(item.get("comment_identity") or comment_identity(item))
+        threaded = _format_comments(all_comments, bot_qq, highlighted_identity)
 
         if multimodal:
             image_lines = [f"[[IMG:{index}:{j}]]" for j in range(1, len(feed_images) + 1)]
@@ -74,10 +117,13 @@ def format_batch_comment_items(
         block = (
             f"=== 评论 {index}/{len(comment_items)} ===\n"
             f"你的说说（{story_time}）：「{feed_content}」"
+            f"\n正文完整性：{_content_completeness(item.get('content_complete'))}"
             f"{image_block_text}\n"
             f"{context_line}\n"
-            f"该说说完整对话链（>>> 标记的是本次需要决策的那条）：\n{threaded}\n"
-            f"[meta] comment_tid={comment_tid}  feed_id={feed_id}"
+            f"评论列表按序号供决策；一级评论可能不完整，内联楼中楼不保证完整。"
+            f" >>> 标记的是本次需要决策的评论。\n{threaded}\n"
+            f"[meta] comment_index={index}  comment_tid={item.get('comment_tid', '')} "
+            f"feed_id={feed_id}"
         )
         blocks.append(block)
 
@@ -105,9 +151,9 @@ def format_feed_items_block(
     for i, item in enumerate(feed_items, 1):
         tid = item.get("tid", "")
         target_qq = item.get("target_qq", "")
-        content = str(item.get("content", "（无正文）")).strip()
+        content = str(item.get("content") or "（无正文）").strip()
         created_time = format_story_time(item.get("created_time")) or "未知时间"
-        image_text = item.get("image_text", "")
+        image_text = str(item.get("image_text") or "")
         comments = item.get("comments", []) or []
 
         liked = bool(item.get("liked"))
@@ -116,33 +162,24 @@ def format_feed_items_block(
             f"=== 说说 {i}/{total} ===\n"
             f"好友 QQ：{target_qq}  发布时间：{created_time}\n"
             f"状态：{like_state}\n"
-            f"正文：「{content[:200]}{'…' if len(content) > 200 else ''}」\n"
+            f"正文完整性：{_content_completeness(item.get('content_complete'))}\n"
+            f"正文：「{content}」\n"
         )
         if multimodal:
-            images = [str(u) for u in item.get("images", []) if u]
+            images = [str(u) for u in item.get("images") or [] if u]
             for j in range(1, len(images) + 1):
                 block += f"[[IMG:{i}:{j}]]\n"
         elif image_text:
             block += f"{image_text}\n"
         # 展示评论区（供 LLM 判断是否回复某条评论）
-        if comments:
-            block += f"评论区（{len(comments)} 条）：\n"
-            for c in comments:
-                nickname = str(c.get("nickname", "") or "").strip() or "匿名"
-                qq = str(c.get("qq_account", "") or "").strip()
-                ctext = str(c.get("content", "") or "").strip()
-                ctid = str(c.get("comment_tid", "") or "").strip()
-                # bot 自己的评论标注为「你（自己）」，便于 LLM 识别
-                if bot_qq and qq == str(bot_qq):
-                    display = "你（自己）"
-                else:
-                    display = nickname
-                block += f"  · {display}"
-                if qq:
-                    block += f"(qq={qq})"
-                if ctid:
-                    block += f" [cid={ctid}]"
-                block += f"：{ctext[:120]}{'…' if len(ctext) > 120 else ''}\n"
+        server_count = item.get("comment_count")
+        visible_count = len(comments)
+        count_label = "未知" if server_count is None else str(server_count)
+        block += (
+            f"评论区（服务端评论数={count_label}，当前可见扁平项={visible_count}；"
+            "一级评论可能部分可见，内联楼中楼不保证完整）：\n"
+        )
+        block += _format_comments(comments, bot_qq) + "\n"
         block += f"[meta] tid={tid}  target_qq={target_qq}"
         blocks.append(block)
 
@@ -165,9 +202,9 @@ def format_self_feed(
         多行文本块
     """
     tid = str(feed.get("tid", "")).strip()
-    content = str(feed.get("content") or feed.get("rt_con") or "（无正文）").strip()
+    content = str(feed.get("content") or "（无正文）").strip()
     created_time = str(feed.get("created_time", "")).strip()
-    images: list[str] = feed.get("images", []) or []
+    images: list[str] = feed.get("images") or []
     comments: list[dict[str, Any]] = feed.get("comments", []) or []
 
     parts: list[str] = []
@@ -177,7 +214,10 @@ def format_self_feed(
     if tid:
         header += f"  (tid={tid})"
     parts.append(header)
+    parts.append(f"正文完整性：{_content_completeness(feed.get('content_complete'))}")
     parts.append(f"正文：{content}")
+    if feed.get("rt_con"):
+        parts.append(f"转发引用（非当前正文）：{feed['rt_con']}")
 
     if images:
         descs = image_descs or {}
@@ -185,23 +225,13 @@ def format_self_feed(
             desc = descs.get(str(url), "").strip()
             parts.append(f"图片{i}：{desc}" if desc else f"图片{i}：（内容未识别）")
 
-    if comments:
-        parts.append(f"评论（共 {len(comments)} 条）：")
-        for c in comments:
-            nickname = str(c.get("nickname", "")).strip() or "匿名"
-            qq = str(c.get("qq_account", "")).strip()
-            ctime = str(c.get("create_time", "")).strip()
-            ctext = str(c.get("content", "")).strip()
-            line = f"  · [{nickname}"
-            if qq:
-                line += f"({qq})"
-            line += "]"
-            if ctime:
-                line += f" {ctime}"
-            line += f"：{ctext}"
-            parts.append(line)
-    else:
-        parts.append("评论：暂无")
+    server_count = feed.get("comment_count")
+    count_label = "未知" if server_count is None else str(server_count)
+    parts.append(
+        f"评论（服务端评论数={count_label}，当前可见扁平项={len(comments)}；"
+        "一级评论可能部分可见，内联楼中楼不保证完整）："
+    )
+    parts.append(_format_comments(comments))
 
     parts.append("")  # 段落分隔
     return "\n".join(parts)

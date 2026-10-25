@@ -6,7 +6,9 @@
 
 from __future__ import annotations
 
+import json
 import time
+from typing import Any
 
 from src.app.plugin_system.api.log_api import get_logger, COLOR
 from src.app.plugin_system.api import storage_api
@@ -30,7 +32,7 @@ class ReplyTrackerService:
 
     def __init__(self) -> None:
         """初始化回复跟踪服务。"""
-        self._data: dict[str, dict[str, dict[str, float]]] = {"data": {}}
+        self._data: dict[str, Any] = {"data": {}, "scoped": {}, "pending_comments": {}}
 
     async def initialize(self) -> None:
         """从持久化存储加载已有回复记录。
@@ -43,12 +45,12 @@ class ReplyTrackerService:
         loaded = await storage_api.load_json(_STORE_NAMESPACE, _STORE_KEY)
         if loaded is None or not isinstance(loaded, dict):
             logger.debug("回复跟踪数据文件不存在或格式异常，使用空数据初始化。")
-            self._data = {"data": {}}
+            self._data = {"data": {}, "scoped": {}, "pending_comments": {}}
             return
         raw_data = loaded.get("data", {})
         if not isinstance(raw_data, dict):
             logger.warning("回复跟踪数据 data 字段非 dict，使用空数据初始化。")
-            self._data = {"data": {}}
+            self._data = {"data": {}, "scoped": {}, "pending_comments": {}}
             return
 
         cleaned: dict[str, dict[str, float]] = {}
@@ -62,7 +64,29 @@ class ReplyTrackerService:
                 for cid, ts in comments.items()
                 if isinstance(ts, (int, float))
             }
-        self._data = {"data": cleaned}
+        raw_scoped = loaded.get("scoped", {})
+        scoped = (
+            {
+                key: entry
+                for key, entry in raw_scoped.items()
+                if isinstance(key, str)
+                and isinstance(entry, dict)
+                and entry.get("status") in {"replied", "pending", "skipped"}
+            }
+            if isinstance(raw_scoped, dict)
+            else {}
+        )
+        raw_pending = loaded.get("pending_comments", {})
+        pending = (
+            {
+                key: timestamp
+                for key, timestamp in raw_pending.items()
+                if isinstance(key, str) and isinstance(timestamp, (int, float))
+            }
+            if isinstance(raw_pending, dict)
+            else {}
+        )
+        self._data = {"data": cleaned, "scoped": scoped, "pending_comments": pending}
         if dropped:
             logger.warning(f"回复跟踪数据加载时丢弃 {dropped} 条格式异常 feed 条目")
         feed_count = len(cleaned)
@@ -85,25 +109,199 @@ class ReplyTrackerService:
         Returns:
             True 表示已回复，False 表示尚未回复
         """
-        return comment_id in self._data["data"].get(feed_id, {})
+        return self.get_status(feed_id, comment_id) in {"replied", "legacy"}
+
+    def _scope_key(
+        self,
+        feed_id: str,
+        comment_id: str,
+        *,
+        account_qq: str,
+        host_qq: str,
+        parent_comment_id: str,
+        parent_comment_uin: str,
+        comment_uin: str,
+    ) -> str | None:
+        """构建完整回复作用域键；缺少任一身份字段时返回 None。"""
+        scope = (
+            account_qq,
+            host_qq,
+            feed_id,
+            parent_comment_id,
+            parent_comment_uin,
+            comment_id,
+            comment_uin,
+        )
+        if not all(str(value) for value in scope):
+            return None
+        return json.dumps([str(value) for value in scope], separators=(",", ":"))
+
+    def get_status(
+        self,
+        feed_id: str,
+        comment_id: str,
+        *,
+        account_qq: str = "",
+        host_qq: str = "",
+        parent_comment_id: str = "",
+        parent_comment_uin: str = "",
+        comment_uin: str = "",
+    ) -> str | None:
+        """读取精确作用域状态，或返回无法归属的 legacy 状态。"""
+        key = self._scope_key(
+            feed_id,
+            comment_id,
+            account_qq=account_qq,
+            host_qq=host_qq,
+            parent_comment_id=parent_comment_id,
+            parent_comment_uin=parent_comment_uin,
+            comment_uin=comment_uin,
+        )
+        if key is not None:
+            entry = self._data["scoped"].get(key)
+            if isinstance(entry, dict):
+                return str(entry["status"])
+        if comment_id in self._data["data"].get(feed_id, {}):
+            return "legacy"
+        return None
+
+    def is_blocked(
+        self,
+        feed_id: str,
+        comment_id: str,
+        *,
+        account_qq: str = "",
+        host_qq: str = "",
+        parent_comment_id: str = "",
+        parent_comment_uin: str = "",
+        comment_uin: str = "",
+    ) -> bool:
+        """判断该作用域是否应从自动处理队列排除。"""
+        return self.get_status(
+            feed_id,
+            comment_id,
+            account_qq=account_qq,
+            host_qq=host_qq,
+            parent_comment_id=parent_comment_id,
+            parent_comment_uin=parent_comment_uin,
+            comment_uin=comment_uin,
+        ) in {"replied", "pending", "skipped", "legacy"}
 
     # ------------------------------------------------------------------
     # 写入接口
     # ------------------------------------------------------------------
 
-    async def mark_as_replied(self, feed_id: str, comment_id: str) -> None:
+    def is_comment_pending(self, account_qq: str, host_qq: str, feed_id: str) -> bool:
+        """判断该账号在指定说说下是否存在待核实的普通评论。"""
+        key = json.dumps([str(account_qq), str(host_qq), str(feed_id)], separators=(",", ":"))
+        return key in self._data["pending_comments"]
+
+    async def mark_comment_pending(self, account_qq: str, host_qq: str, feed_id: str) -> None:
+        """记录普通评论投递待核实，保留内存阻止状态并持久化。"""
+        if not all((account_qq, host_qq, feed_id)):
+            raise ValueError("普通评论待核实状态必须提供账号、主人和说说 ID")
+        key = json.dumps([str(account_qq), str(host_qq), str(feed_id)], separators=(",", ":"))
+        self._data["pending_comments"][key] = time.time()
+        await self._persist()
+
+    async def mark_as_replied(
+        self,
+        feed_id: str,
+        comment_id: str,
+        *,
+        account_qq: str = "",
+        host_qq: str = "",
+        parent_comment_id: str = "",
+        parent_comment_uin: str = "",
+        comment_uin: str = "",
+    ) -> None:
         """标记指定评论已回复，并持久化到存储。
 
         Args:
             feed_id: 说说 ID
             comment_id: 评论 ID
         """
-        if feed_id not in self._data["data"]:
-            self._data["data"][feed_id] = {}
+        await self._mark(
+            "replied", feed_id, comment_id, account_qq=account_qq,
+            host_qq=host_qq, parent_comment_id=parent_comment_id,
+            parent_comment_uin=parent_comment_uin, comment_uin=comment_uin,
+        )
 
-        self._data["data"][feed_id][comment_id] = time.time()
+    async def mark_pending(
+        self,
+        feed_id: str,
+        comment_id: str,
+        *,
+        account_qq: str = "",
+        host_qq: str = "",
+        parent_comment_id: str = "",
+        parent_comment_uin: str = "",
+        comment_uin: str = "",
+    ) -> None:
+        """记录写入结果未知；该状态阻止自动重发但不表示成功。"""
+        await self._mark(
+            "pending", feed_id, comment_id, account_qq=account_qq,
+            host_qq=host_qq, parent_comment_id=parent_comment_id,
+            parent_comment_uin=parent_comment_uin, comment_uin=comment_uin,
+        )
+
+    async def mark_skipped(
+        self,
+        feed_id: str,
+        comment_id: str,
+        *,
+        account_qq: str = "",
+        host_qq: str = "",
+        parent_comment_id: str = "",
+        parent_comment_uin: str = "",
+        comment_uin: str = "",
+    ) -> None:
+        """记录已明确跳过的评论，不将其视为已回复。"""
+        await self._mark(
+            "skipped", feed_id, comment_id, account_qq=account_qq,
+            host_qq=host_qq, parent_comment_id=parent_comment_id,
+            parent_comment_uin=parent_comment_uin, comment_uin=comment_uin,
+        )
+
+    async def _mark(
+        self,
+        status: str,
+        feed_id: str,
+        comment_id: str,
+        *,
+        account_qq: str,
+        host_qq: str,
+        parent_comment_id: str,
+        parent_comment_uin: str,
+        comment_uin: str,
+    ) -> None:
+        """写入作用域状态；持久化失败时保留内存记录并向上传播。"""
+        key = self._scope_key(
+            feed_id, comment_id, account_qq=account_qq, host_qq=host_qq,
+            parent_comment_id=parent_comment_id,
+            parent_comment_uin=parent_comment_uin, comment_uin=comment_uin,
+        )
+        if key is None:
+            if status != "replied":
+                raise ValueError("pending/skipped 状态必须提供完整评论作用域")
+            bucket = self._data["data"].setdefault(feed_id, {})
+            previous = bucket.get(comment_id)
+            bucket[comment_id] = time.time()
+            try:
+                await self._persist()
+            except Exception:
+                if previous is None:
+                    del bucket[comment_id]
+                    if not bucket:
+                        del self._data["data"][feed_id]
+                else:
+                    bucket[comment_id] = previous
+                raise
+            return
+
+        scoped = self._data["scoped"]
+        scoped[key] = {"status": status, "timestamp": time.time()}
         await self._persist()
-        logger.debug(f"已标记评论 {comment_id}（说说 {feed_id}）为已回复。")
 
     # ------------------------------------------------------------------
     # 私有辅助方法
@@ -112,9 +310,6 @@ class ReplyTrackerService:
     async def _persist(self) -> None:
         """将当前数据写入 storage_api 持久化存储。
 
-        若保存失败，仅记录错误日志，不抛出异常。
+        保存失败时向调用方传播，避免下一轮误以为状态已落盘。
         """
-        try:
-            await storage_api.save_json(_STORE_NAMESPACE, _STORE_KEY, self._data)
-        except Exception as e:
-            logger.error(f"持久化回复跟踪数据失败: {e}")
+        await storage_api.save_json(_STORE_NAMESPACE, _STORE_KEY, self._data)

@@ -4,13 +4,203 @@ from __future__ import annotations
 
 import re
 import time
+from collections.abc import Iterable
 from typing import Any
+from urllib.parse import parse_qs, urlsplit
 
+import aiohttp
 import bs4
-import json5
-import orjson
+from bs4.element import Tag
 
 from .client import LIST_URL, MSG_DETAIL_URL, ZONE_LIST_URL, QZoneClientBase, logger
+from .feed_content import parse_feed_content
+from .feed_cursor import (
+    feed_position,
+    initial_feed_state,
+    next_feed_state,
+)
+from .response import check_response, parse_response
+
+
+def _as_count(*values: Any) -> int | None:
+    """返回首个有效的服务端非负整数统计。"""
+    for value in values:
+        if isinstance(value, bool):
+            continue
+        if isinstance(value, int) and 0 <= value <= 9_007_199_254_740_991:
+            return value
+        if isinstance(value, str) and value.isdecimal() and len(value) <= 16:
+            number = int(value)
+            if number <= 9_007_199_254_740_991:
+                return number
+    return None
+
+
+def _image_urls(raw: Any) -> list[str] | None:
+    """解析说说图片列表；字段缺失与确认无图分别保留。"""
+    if raw is None:
+        return None
+    if not isinstance(raw, list):
+        raise TypeError("说说图片字段结构异常")
+    images: list[str] = []
+    seen: set[str] = set()
+    for item in raw:
+        if not isinstance(item, dict):
+            raise TypeError("说说图片条目结构异常")
+        for field in ("url3", "url2", "url1", "smallurl"):
+            value = item.get(field)
+            if not isinstance(value, str) or not value:
+                continue
+            url = value.strip()
+            if url.startswith("//"):
+                url = f"https:{url}"
+            try:
+                parsed = urlsplit(url)
+            except ValueError:
+                continue
+            if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+                continue
+            if url not in seen:
+                images.append(url)
+                seen.add(url)
+            break
+    return images
+
+
+def _comment_identity(comment: dict[str, Any]) -> tuple[str, str, str]:
+    """使用父评论、作者与评论 ID 组成楼中楼安全去重键。"""
+    return (
+        str(comment.get("parent_tid") if comment.get("parent_tid") is not None else ""),
+        str(comment.get("comment_tid") if comment.get("comment_tid") is not None else ""),
+        str(comment.get("qq_account") if comment.get("qq_account") is not None else ""),
+    )
+
+
+def _map_detail_comments(raw_comments: Iterable[Any], client: QZoneClientBase) -> list[dict[str, Any]]:
+    """将详情页一级评论及内联回复映射为 FoxZone 消费者字段。"""
+    result: list[dict[str, Any]] = []
+    for raw in raw_comments:
+        if not isinstance(raw, dict):
+            raise TypeError("详情评论条目结构异常")
+        parent_id = raw.get("tid")
+        if parent_id is None or isinstance(parent_id, (dict, list)):
+            raise ValueError("详情一级评论缺少有效 tid")
+        parent_uin = raw.get("uin")
+        mapped_parent = {
+            "qq_account": parent_uin,
+            "nickname": raw.get("name"),
+            "content": raw.get("content"),
+            "comment_tid": parent_id,
+            "parent_tid": None,
+            "parent_comment_id": None,
+            "parent_comment_uin": None,
+            "comment_id": parent_id,
+            "uin": parent_uin,
+            "name": raw.get("name"),
+            "create_time": client._parse_comment_time(raw),
+        }
+        result.append(mapped_parent)
+        replies = raw.get("list_3")
+        if replies is None:
+            continue
+        if not isinstance(replies, list):
+            raise TypeError("详情楼中楼字段结构异常")
+        for reply in replies:
+            if not isinstance(reply, dict):
+                raise TypeError("详情楼中楼条目结构异常")
+            reply_id = reply.get("tid")
+            if reply_id is None or isinstance(reply_id, (dict, list)):
+                raise ValueError("详情楼中楼缺少有效 tid")
+            reply_uin = reply.get("uin")
+            result.append(
+                {
+                    "qq_account": reply_uin,
+                    "nickname": reply.get("name"),
+                    "content": reply.get("content"),
+                    "comment_tid": reply_id,
+                    "parent_tid": parent_id,
+                    "parent_comment_id": parent_id,
+                    "parent_comment_uin": parent_uin,
+                    "comment_id": reply_id,
+                    "uin": reply_uin,
+                    "name": reply.get("name"),
+                    "create_time": client._parse_comment_time(reply),
+                }
+            )
+    return result
+
+
+def _monitor_comments(soup: bs4.BeautifulSoup) -> list[dict[str, Any]]:
+    """映射动态 HTML 中的既有一级评论数据。"""
+    comments: list[dict[str, Any]] = []
+    for comment_div in soup.find_all("div", class_="single-reply"):
+        if not isinstance(comment_div, Tag):
+            continue
+        qq_account = ""
+        avatar = comment_div.find("div", class_="ui-avatar")
+        if isinstance(avatar, Tag):
+            avatar_link = avatar.find("a", href=True)
+            if isinstance(avatar_link, Tag):
+                match = re.search(r"qzone\.qq\.com/(\d+)", str(avatar_link["href"]))
+                if match:
+                    qq_account = match.group(1)
+        nickname = ""
+        nickname_link = comment_div.find("a", class_="nickname")
+        if isinstance(nickname_link, Tag):
+            nickname = nickname_link.get_text(strip=True)
+        content = ""
+        content_div = comment_div.find("div", class_="comments-content")
+        if isinstance(content_div, Tag):
+            content_soup = bs4.BeautifulSoup(str(content_div), "html.parser")
+            for selector in (".comments-op", "a.nickname"):
+                for node in content_soup.select(selector):
+                    node.decompose()
+            content = re.sub(r"\s+", " ", content_soup.get_text(" ", strip=True))
+            content = re.sub(r"^:\s*", "", content).strip()
+        comment_id = ""
+        parent_comment_id: str | None = None
+        parent_comment_uin: str | None = None
+        reply_link = comment_div.find("a", class_="act-reply")
+        if isinstance(reply_link, Tag):
+            values = parse_qs(str(reply_link.get("data-param", "")))
+            comment_id = values.get("t2_tid", [""])[0]
+            if not qq_account:
+                qq_account = values.get("t2_uin", [""])[0]
+            parent_comment_id = values.get("t1_tid", [None])[0]
+            parent_comment_uin = values.get("t1_uin", [None])[0]
+        comments.append(
+            {
+                "qq_account": qq_account,
+                "nickname": nickname,
+                "content": content,
+                "comment_tid": comment_id,
+                "parent_tid": parent_comment_id,
+                "parent_comment_id": parent_comment_id,
+                "parent_comment_uin": parent_comment_uin,
+                "comment_id": comment_id,
+                "uin": qq_account,
+                "name": nickname,
+            }
+        )
+    return comments
+
+
+def _has_more_feeds(data: dict[str, Any], main: dict[str, Any] | None) -> bool:
+    """按 feeds CGI 规则读取结束标志，仅在 main 缺失时读 hasmore。"""
+    value = main.get("hasMoreFeeds") if main is not None else data.get("hasmore")
+    if value is True or (type(value) is int and value == 1) or value == "1":
+        return True
+    if value is False or (type(value) is int and value == 0) or value == "0":
+        return False
+    raise ValueError("好友动态响应缺少有效 hasMoreFeeds 标志")
+
+
+def _feed_state_params(state: dict[str, str]) -> dict[str, str]:
+    """将游标状态映射为 feeds3_html_more 的查询参数。"""
+    params = dict(state)
+    params["getAisort"] = state["aisortNextTime"]
+    params.pop("aisortNextTime")
+    return params
 
 
 class FeedsMixin(QZoneClientBase):
@@ -23,23 +213,7 @@ class FeedsMixin(QZoneClientBase):
         skip_commented: bool = True,
         paginate_comments: bool = True,
     ) -> list[dict[str, Any]]:
-        """获取指定 QQ 用户的说说列表（含全部评论，自动分页补全）。
-
-        Args:
-            target_qq: 目标 QQ 号
-            num: 获取数量
-            skip_commented: 为 True 时跳过 Bot 已评论的说说（用于监控互动场景）；
-                为 False 时返回全部说说（用于纯读取展示场景）
-            paginate_comments: 是否对每条说说调用 msgdetail_v6 补全评论区。
-                关闭时仅使用 msglist_v6 自带的 commentlist（含 list_3 楼中楼），
-                请求量从 1+N 降为 1。
-
-        Returns:
-            说说数据字典列表
-
-        Raises:
-            RuntimeError: Cookie 失效（code=-3000）或 API 返回错误
-        """
+        """获取指定账号的说说；可选读取带完整性状态的详情评论分页。"""
         params: dict[str, Any] = {
             "g_tk": self._gtk,
             "uin": target_qq,
@@ -54,17 +228,16 @@ class FeedsMixin(QZoneClientBase):
         }
         try:
             res_text = await self._request("GET", LIST_URL, params=params)
-            json_data = orjson.loads(res_text)
-
-            if json_data.get("code") != 0:
-                code = json_data.get("code")
-                msg = json_data.get("message", "未知错误")
-                raise RuntimeError(f"QQ 空间 API 错误: {msg} (错误码: {code})")
+            json_data = parse_response(res_text)
+            check_response(json_data, "msglist")
+            msglist = json_data.get("msglist")
+            if not isinstance(msglist, list):
+                raise TypeError("说说列表响应缺少 msglist")
 
             my_name = (json_data.get("logininfo") or {}).get("name", "")
             feeds_list: list[dict[str, Any]] = []
 
-            for msg_data in (json_data.get("msglist") or []):
+            for msg_data in msglist:
                 if not isinstance(msg_data, dict):
                     continue
                 msg_tid = msg_data.get("tid", "")
@@ -78,79 +251,65 @@ class FeedsMixin(QZoneClientBase):
                     ):
                         continue
 
-                # 提取图片 URL
-                images_data: list[str] = []
-                for key in ("pic", "pictotal"):
-                    if isinstance(msg_data.get(key), list):
-                        images_data = [
-                            p.get("url1", "")
-                            for p in msg_data[key]
-                            if p.get("url1")
-                        ]
-                        if images_data:
-                            break
-
-                # 解析评论列表
-                comments: list[dict[str, Any]] = []
-                for c in msg_data.get("commentlist") or []:
-                    if not isinstance(c, dict):
-                        continue
-                    create_time = self._parse_comment_time(c)
-                    comments.append(
-                        {
-                            "qq_account": c.get("uin"),
-                            "nickname": c.get("name"),
-                            "content": c.get("content"),
-                            "comment_tid": c.get("tid"),
-                            "parent_tid": None,
-                            "create_time": create_time,
-                        }
-                    )
-                    # 二级评论
-                    for reply in c.get("list_3") or []:
-                        if not isinstance(reply, dict):
-                            continue
-                        reply_time = self._parse_comment_time(reply)
-                        comments.append(
-                            {
-                                "qq_account": reply.get("uin"),
-                                "nickname": reply.get("name"),
-                                "content": reply.get("content"),
-                                "comment_tid": reply.get("tid"),
-                                "parent_tid": c.get("tid"),
-                                "create_time": reply_time,
-                            }
-                        )
+                images_data = _image_urls(msg_data.get("pic"))
+                inline_comments = msg_data.get("commentlist")
+                if inline_comments is None:
+                    inline_comments = []
+                if not isinstance(inline_comments, list):
+                    raise TypeError("说说内嵌评论字段结构异常")
+                comments = _map_detail_comments(inline_comments, self)
 
                 rt_raw = msg_data.get("rt_con", {})
                 rt_content = (
                     rt_raw.get("content", "") if isinstance(rt_raw, dict) else ""
                 )
 
-                # 通过 msgdetail_v6 接口拉取完整评论列表，覆盖 msglist_v6 内嵌的评论。
-                # msglist_v6 返回的 commentlist 中，主评论 tid 在某些场景下是局部序号
-                # （"1"/"2"/...，而非 24 位 hex 全局 tid），会导致后续 reply 触发 -10049；
-                # msgdetail_v6 始终返回 hex 全局 tid。
+                detail: dict[str, Any] | None = None
                 if paginate_comments:
-                    fresh = await self._fetch_all_comments(
-                        host_qq=str(target_qq),
-                        tid=str(msg_tid),
-                    )
-                    if fresh:
-                        comments = fresh
+                    try:
+                        detail = await self.fetch_feed_detail(
+                            host_qq=str(target_qq), tid=str(msg_tid), paginate_comments=True
+                        )
+                    except RuntimeError as exc:
+                        if "错误码: -3000" in str(exc):
+                            raise
+                        logger.warning(f"说说详情读取失败，保留列表数据 (tid={msg_tid}): {exc}")
+                    except (aiohttp.ClientError, OSError, TimeoutError, ValueError, TypeError) as exc:
+                        logger.warning(f"说说详情读取失败，保留列表数据 (tid={msg_tid}): {exc}")
+                    if detail is not None:
+                        comments = detail["comments"]
+
+                content = msg_data.get("content")
+                if not isinstance(content, str):
+                    raise TypeError("说说正文字段结构异常")
+                content_complete: bool | None = None
+                comment_total = _as_count(msg_data.get("cmtnum"), msg_data.get("commentnum"))
+                if detail is not None:
+                    if detail["content"]:
+                        content = detail["content"]
+                        content_complete = detail["content_complete"]
+                    if detail["images"] is not None:
+                        images_data = list(dict.fromkeys([*(images_data or []), *detail["images"]]))
+                    if detail["comment_count"] is not None:
+                        comment_total = detail["comment_count"]
 
                 feeds_list.append(
                     {
                         "tid": msg_tid,
-                        "content": msg_data.get("content", ""),
+                        "content": content,
+                        "content_complete": content_complete,
                         "created_time": time.strftime(
-                            "%Y-%m-%d %H:%M:%S",
-                            time.localtime(msg_data.get("created_time", 0)),
+                            "%Y-%m-%d %H:%M:%S", time.localtime(int(msg_data.get("created_time") or 0))
                         ),
                         "rt_con": rt_content,
                         "images": images_data,
                         "comments": comments,
-                        "comment_total": int(msg_data.get("commentnum", len(comments))),
+                        "comment_total": comment_total,
+                        "comment_count": comment_total,
+                        "comments_complete": (
+                            detail["comments_complete"] if detail is not None else False
+                        ),
+                        "inline_replies_complete": False,
                     }
                 )
 
@@ -171,155 +330,137 @@ class FeedsMixin(QZoneClientBase):
             raise
         except Exception as e:
             logger.error(f"获取说说列表失败: {e}")
-            return []
+            raise
 
     async def _fetch_all_comments(
         self,
         host_qq: str,
         tid: str,
     ) -> list[dict[str, Any]]:
-        """通过 ``msgdetail_v6`` 接口获取说说的完整评论列表。
-
-        ``msgdetail_v6`` 一次性返回完整评论列表（含 list_3 楼中楼），
-        且其中的评论 tid 为 hex 全局 tid，可作为 reply 接口的 commentId。
-        若接口失败（如 -10004 资源限制），返回空列表，由调用方降级使用
-        msglist_v6 内嵌评论数据。
-
-        Args:
-            host_qq: 说说主人 QQ 号
-            tid: 说说 tid
-
-        Returns:
-            完整评论列表；接口不可用时返回空列表
-        """
-        try:
-            detail = await self.fetch_feed_detail(str(host_qq), str(tid))
-        except Exception as exc:
-            logger.debug(f"msgdetail 调用异常（host={host_qq}, tid={tid}）: {exc}")
-            return []
-
-        if not detail:
-            return []
-        all_comments = detail.get("comments") or []
-        if not isinstance(all_comments, list):
-            return []
-        return list(all_comments)
+        """兼容旧调用者，返回详情中的已读取扁平评论列表。"""
+        detail = await self.fetch_feed_detail(host_qq, tid)
+        return list(detail["comments"]) if detail is not None else []
 
     async def fetch_feed_detail(
-        self, host_qq: str, tid: str
+        self,
+        host_qq: str,
+        tid: str,
+        paginate_comments: bool = True,
+        comment_page_size: int = 20,
+        max_comment_pages: int = 20,
     ) -> dict[str, Any] | None:
-        """按 tid 精准查询单条说说详情（含评论区 list_3 楼中楼）。
-
-        使用 ``emotion_cgi_msgdetail_v6`` 接口，规避 ``emotion_cgi_comment_list``
-        在部分账号上 500 的故障。一次请求即可拿到这条 feed 的正文、图片
-        与完整评论区，是「按 InteractionLog 标记精准回查」的最优路径。
-
-        Args:
-            host_qq: 说说主人 QQ 号
-            tid: 说说 tid
-
-        Returns:
-            形如 ``{"tid", "content", "created_time", "images", "comments",
-            "comment_total"}`` 的 dict；接口失败或未找到时返回 None。
-        """
-        # QZone 只接受该参数集；追加其他字段会返回 -10004 参数错误。
+        """读取说说详情与有界一级评论页，返回服务端完整性状态。"""
+        if not tid:
+            raise ValueError("tid 不能为空")
+        if comment_page_size < 1 or max_comment_pages < 1:
+            raise ValueError("评论页大小和页数预算必须为正数")
         params: dict[str, Any] = {
             "uin": str(host_qq),
             "tid": str(tid),
-            "format": "jsonp",
+            "t1_source": "1",
+            "not_trunc_con": "1",
+            "need_right": "1",
+            "not_adapt_outpic": "1",
             "g_tk": self._gtk,
         }
-        # h5 子域，需要覆盖 Host/Referer
-        headers = {
-            "Host": "h5.qzone.qq.com",
-            "Referer": f"https://h5.qzone.qq.com/mqzone/index?_proxy=1&hostuin={host_qq}",
-        }
-        try:
-            res_text = await self._request(
-                "GET", MSG_DETAIL_URL, params=params, headers=headers
-            )
-            # format=jsonp 返回 `_Callback({...});` 或 `_Callback({...})`，需剥外壳
-            stripped = res_text.strip()
-            if stripped.startswith("_Callback(") and stripped.endswith(");"):
-                json_str = stripped[len("_Callback("):-2]
-            elif stripped.startswith("_Callback(") and stripped.endswith(")"):
-                json_str = stripped[len("_Callback("):-1]
-            else:
-                json_str = stripped
-            json_data = orjson.loads(json_str)
-        except Exception as exc:
-            logger.warning(
-                f"按 tid 拉取说说详情失败（host={host_qq}, tid={tid}）: {exc}"
-            )
-            return None
+        if paginate_comments:
+            params.update(pos=0, num=comment_page_size)
+        url = MSG_DETAIL_URL.replace("taotao.qzone.qq.com", "taotao.qq.com")
+        headers = {"Referer": f"https://user.qzone.qq.com/{host_qq}"}
 
-        code = json_data.get("code")
-        if code != 0:
-            logger.debug(
-                f"msgdetail 返回非 0（host={host_qq}, tid={tid}）: "
-                f"code={code}, message={json_data.get('message')}"
-            )
-            return None
-
-        # msgdetail 返回结构有两种已知形态：根直接是 msg；或 {"msglist": [...]}.
-        msg_data: dict[str, Any] | None = None
-        if isinstance(json_data.get("msglist"), list) and json_data["msglist"]:
-            msg_data = json_data["msglist"][0]
-        elif json_data.get("tid") or json_data.get("content") is not None:
-            msg_data = json_data
-        if not msg_data:
-            return None
-
-        # 图片
-        images_data: list[str] = []
-        for key in ("pic", "pictotal"):
-            raw = msg_data.get(key)
+        async def request_page(pos: int) -> dict[str, Any]:
+            """读取并校验一个详情评论页。"""
+            page_params = dict(params)
+            if paginate_comments:
+                page_params.update(pos=pos, num=comment_page_size)
+            text = await self._request("GET", url, params=page_params, headers=headers)
+            response = parse_response(text)
+            check_response(response, "msgdetail")
+            raw = response.get("msglist")
             if isinstance(raw, list):
-                images_data = [p.get("url1", "") for p in raw if p.get("url1")]
-                if images_data:
-                    break
+                if not raw or not isinstance(raw[0], dict):
+                    raise ValueError("详情响应缺少说说对象")
+                message = raw[0]
+            else:
+                message = response
+            if str(message.get("tid", "")) != str(tid):
+                raise ValueError("详情响应 tid 与请求不匹配")
+            if not isinstance(message.get("content"), str):
+                raise TypeError("详情响应正文结构异常")
+            if message.get("commentlist") is not None and not isinstance(message["commentlist"], list):
+                raise TypeError("详情评论页结构异常")
+            return message
 
-        # 评论区
+        first = await request_page(0)
+        raw_images = _image_urls(first.get("pic"))
+        comment_total = _as_count(
+            first.get("cmtnum"), first.get("commentnum"), first.get("comment_num")
+        )
         comments: list[dict[str, Any]] = []
-        for c in msg_data.get("commentlist") or []:
-            if not isinstance(c, dict):
-                continue
-            create_time = self._parse_comment_time(c)
-            comments.append(
-                {
-                    "qq_account": c.get("uin"),
-                    "nickname": c.get("name"),
-                    "content": c.get("content"),
-                    "comment_tid": c.get("tid"),
-                    "parent_tid": None,
-                    "create_time": create_time,
-                }
-            )
-            for reply in c.get("list_3") or []:
-                if not isinstance(reply, dict):
-                    continue
-                reply_time = self._parse_comment_time(reply)
-                comments.append(
-                    {
-                        "qq_account": reply.get("uin"),
-                        "nickname": reply.get("name"),
-                        "content": reply.get("content"),
-                        "comment_tid": reply.get("tid"),
-                        "parent_tid": c.get("tid"),
-                        "create_time": reply_time,
-                    }
-                )
+        seen: set[tuple[str, str, str]] = set()
+        seen_parents: set[tuple[str, str, str]] = set()
+        comments_complete = False
+        inline_replies_complete = False
+        if not paginate_comments:
+            initial = first.get("commentlist") or []
+            comments = _map_detail_comments(initial, self)
+        else:
+            page = first
+            pos = 0
+            for page_index in range(max_comment_pages):
+                raw_comments = page.get("commentlist") or []
+                if not isinstance(raw_comments, list):
+                    raise TypeError("详情评论页结构异常")
+                mapped = _map_detail_comments(raw_comments, self)
+                new_count = 0
+                for comment in mapped:
+                    identity = _comment_identity(comment)
+                    if identity in seen:
+                        continue
+                    seen.add(identity)
+                    comments.append(comment)
+                    if comment["parent_tid"] is None:
+                        seen_parents.add(identity)
+                        new_count += 1
+                if not raw_comments:
+                    comments_complete = comment_total is not None and len(seen_parents) == comment_total
+                    break
+                if new_count == 0:
+                    break
+                if comment_total is not None and len(seen_parents) >= comment_total:
+                    comments_complete = len(seen_parents) == comment_total
+                    break
+                pos += len(raw_comments)
+                if page_index + 1 >= max_comment_pages:
+                    break
+                try:
+                    page = await request_page(pos)
+                except RuntimeError as exc:
+                    if "错误码: -3000" in str(exc):
+                        raise
+                    logger.warning(f"评论后续页读取中断（host={host_qq}, tid={tid}）: {exc}")
+                    break
+                except (aiohttp.ClientError, OSError, TimeoutError, ValueError, TypeError) as exc:
+                    logger.warning(f"评论后续页读取中断（host={host_qq}, tid={tid}）: {exc}")
+                    break
+            inline_replies_complete = False
 
+        created_raw = first.get("created_time", first.get("create_time", 0))
+        try:
+            created_time = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(int(created_raw or 0)))
+        except (TypeError, ValueError, OverflowError, OSError):
+            created_time = ""
         return {
-            "tid": str(msg_data.get("tid", tid)),
-            "content": msg_data.get("content", ""),
-            "created_time": time.strftime(
-                "%Y-%m-%d %H:%M:%S",
-                time.localtime(msg_data.get("created_time", 0)),
-            ),
-            "images": images_data,
+            "tid": str(tid),
+            "content": first["content"],
+            "content_complete": True,
+            "created_time": created_time,
+            "images": raw_images,
             "comments": comments,
-            "comment_total": int(msg_data.get("commentnum", len(comments))),
+            "comment_total": comment_total,
+            "comment_count": comment_total,
+            "comments_complete": comments_complete,
+            "inline_replies_complete": inline_replies_complete,
         }
 
     async def monitor_list_feeds(self, num: int) -> list[dict[str, Any]]:
@@ -334,188 +475,133 @@ class FeedsMixin(QZoneClientBase):
         Raises:
             RuntimeError: Cookie 失效（code=-3000）或 API 返回错误
         """
-        params: dict[str, Any] = {
-            "uin": self._uin,
-            "scope": 0,
-            "view": 1,
-            "filter": "all",
-            "flag": 1,
-            "applist": "all",
-            "pagenum": 1,
-            "count": num,
-            "format": "json",
-            "g_tk": self._gtk,
-            "useutf8": 1,
-            "outputhtmlfeed": 1,
-        }
+        if num < 1:
+            return []
+        page_size = min(10, num)
+        page_budget = min(20, max(1, ((num + page_size - 1) // page_size) * 4))
+        state = initial_feed_state()
+        seen_positions = {feed_position(state)}
+        seen_feeds: set[tuple[str, str, str]] = set()
+        feeds_list: list[dict[str, Any]] = []
         try:
-            res_text = await self._request("GET", ZONE_LIST_URL, params=params)
-
-            # 处理 JSONP 响应格式
-            stripped = res_text.strip()
-            if stripped.startswith("_Callback(") and stripped.endswith(");"):
-                json_str = stripped[len("_Callback("):-2]
-            elif stripped.startswith("{"):
-                json_str = stripped
-            else:
-                logger.warning(f"意外的监控响应格式: {res_text[:100]}")
-                return []
-
-            json_str = json_str.replace("undefined", "null").strip()
-
-            try:
-                json_data = json5.loads(json_str)
-            except Exception as e:
-                logger.error(f"监控响应 JSON 解析失败: {e}")
-                return []
-
-            if not isinstance(json_data, dict):
-                return []
-
-            if json_data.get("code") != 0:
-                code = json_data.get("code")
-                msg = json_data.get("message", "未知错误")
-                raise RuntimeError(f"QQ 空间 API 错误: {msg} (错误码: {code})")
-
-            feeds_raw = (
-                json_data.get("data", {}).get("data", [])
-                if isinstance(json_data.get("data"), dict)
-                else []
-            )
-
-            feeds_list: list[dict[str, Any]] = []
-            for feed in feeds_raw:
-                if not isinstance(feed, dict):
-                    continue
-                if str(feed.get("appid", "")) != "311":
-                    continue
-
-                target_qq_str = str(feed.get("uin", ""))
-                tid = feed.get("key", "")
-                html_content = feed.get("html", "")
-
-                if not target_qq_str or not tid or not html_content:
-                    continue
-                if target_qq_str == str(self._uin):
-                    continue
-
-                soup = bs4.BeautifulSoup(html_content, "html.parser")
-
-                # 提取点赞状态（已点赞的说说也返回，交由上层/LLM 决策是否再互动）
-                like_btn = soup.find("a", class_="qz_like_btn_v3")
-                liked = (
-                    isinstance(like_btn, bs4.Tag)
-                    and like_btn.get("data-islike") == "1"
+            for page_number in range(1, page_budget + 1):
+                params: dict[str, Any] = {
+                    "uin": self._uin,
+                    "scope": 0,
+                    "view": 1,
+                    "gid": "",
+                    "flag": 1,
+                    "filter": "all",
+                    "applist": "all",
+                    "refresh": 0,
+                    "firstGetGroup": 0,
+                    "mixnocache": 0,
+                    "scene": 0,
+                    "sidomain": "qzonestyle.gtimg.cn",
+                    "count": page_size,
+                    **_feed_state_params(state),
+                    "g_tk": self._gtk,
+                    "useutf8": 1,
+                    "outputhtmlfeed": 1,
+                    "callback": "_preloadCallback",
+                    "format": "jsonp",
+                }
+                params["usertime"] = int(time.time() * 1000)
+                params["rd"] = str(time.time_ns())
+                params["windowId"] = f"feed-{page_number}-{time.time_ns()}"
+                response = parse_response(
+                    await self._request("GET", ZONE_LIST_URL, params=params)
                 )
+                check_response(response, "feeds3_html_more")
+                data = response.get("data")
+                if not isinstance(data, dict):
+                    raise TypeError("好友动态响应缺少 data 对象")
+                main_value = data.get("main")
+                if "main" in data and not isinstance(main_value, dict):
+                    raise TypeError("好友动态分页状态结构异常")
+                main = main_value if isinstance(main_value, dict) else None
+                if main is not None and "error" in main and main["error"] != "":
+                    raise RuntimeError("好友动态服务端报告读取失败")
+                raw_feeds = data.get("data")
+                if not isinstance(raw_feeds, list):
+                    raise TypeError("好友动态响应缺少动态列表")
+                has_more = _has_more_feeds(data, main)
+                if has_more and main is None:
+                    raise ValueError("好友动态继续分页但缺少 main 状态")
 
-                text_div = soup.find("div", class_="f-info")
-                text = (
-                    text_div.get_text(strip=True)
-                    if isinstance(text_div, bs4.Tag)
-                    else ""
-                )
-
-                # 提取图片
-                image_urls: list[str] = []
-                img_box = soup.find("div", class_="img-box")
-                if isinstance(img_box, bs4.Tag):
-                    for img in img_box.find_all("img"):
-                        if isinstance(img, bs4.Tag):
-                            src = img.get("src")
-                            if src and "qzonestyle.gtimg.cn" not in str(src):
-                                image_urls.append(str(src))
-                video_thumb = soup.select_one("div.video-img img")
-                if isinstance(video_thumb, bs4.Tag) and "src" in video_thumb.attrs:
-                    image_urls.append(str(video_thumb["src"]))
-                image_urls = list(set(image_urls))
-
-                # 提取评论：feeds3_html_more 的评论区使用 single-reply 结构，
-                # 每条含头像 href（QQ）、.nickname（昵称）、.comments-content（内容），
-                # 以及 act-reply 的 data-param 中的 t2_tid（评论 tid）/ t2_uin（评论者）。
-                monitor_comments: list[dict[str, Any]] = []
-                for comment_div in soup.find_all("div", class_="single-reply"):
-                    if not isinstance(comment_div, bs4.Tag):
+                for feed in raw_feeds:
+                    if feed is None:
                         continue
-                    # QQ 从头像 href 提取（user.qzone.qq.com/<qq>）
-                    qq_account = ""
-                    avatar = comment_div.find("div", class_="ui-avatar")
-                    if isinstance(avatar, bs4.Tag):
-                        avatar_a = avatar.find("a", href=True)
-                        if avatar_a is not None:
-                            href = str(avatar_a["href"])
-                            m = re.search(r"qzone\.qq\.com/(\d+)", href)
-                            if m:
-                                qq_account = m.group(1)
-                    # 昵称
-                    nickname = ""
-                    nick_a = comment_div.find("a", class_="nickname")
-                    if isinstance(nick_a, bs4.Tag):
-                        nickname = nick_a.get_text(strip=True)
-                    # 内容：comments-content 移除昵称锚点与操作区（comments-op）后的正文
-                    content = ""
-                    content_div = comment_div.find("div", class_="comments-content")
-                    if isinstance(content_div, bs4.Tag):
-                        # 用字符串重建副本，避免 extract 影响原 DOM
-                        content_soup = bs4.BeautifulSoup(
-                            str(content_div), "html.parser"
-                        )
-                        op_div = content_soup.find("div", class_="comments-op")
-                        if op_div is not None:
-                            op_div.extract()
-                        nick_node = content_soup.find("a", class_="nickname")
-                        if nick_node is not None:
-                            nick_node.extract()
-                        content = content_soup.get_text(" ", strip=True)
-                        # 归一化空白（HTML 含大量制表符/换行）
-                        content = re.sub(r"\s+", " ", content).strip()
-                        # 去掉可能残留的 ":" 前缀
-                        content = re.sub(r"^:\s*", "", content).strip()
-                    # 评论 tid 与评论者：act-reply 的 data-param 中 t2_tid / t2_uin
-                    comment_tid = ""
-                    reply_a = comment_div.find("a", class_="act-reply")
-                    if isinstance(reply_a, bs4.Tag):
-                        data_param = str(reply_a.get("data-param", ""))
-                        m_tid = re.search(r"t2_tid=([^&\s]+)", data_param)
-                        if m_tid:
-                            comment_tid = m_tid.group(1)
-                        if not qq_account:
-                            m_uin = re.search(r"t2_uin=([^&\s]+)", data_param)
-                            if m_uin:
-                                qq_account = m_uin.group(1)
-                    monitor_comments.append(
+                    if not isinstance(feed, dict):
+                        raise TypeError("好友动态条目结构异常")
+                    if str(feed.get("appid", "")) != "311":
+                        continue
+                    target_qq_str = str(feed.get("uin", ""))
+                    feed_key = feed.get("key", feed.get("feedskey", ""))
+                    html_content = feed.get("html")
+                    if (
+                        not target_qq_str
+                        or target_qq_str == str(self._uin)
+                        or not isinstance(feed_key, str)
+                        or not feed_key
+                        or not isinstance(html_content, str)
+                        or not html_content
+                    ):
+                        continue
+                    structured = parse_feed_content(
+                        html_content,
+                        feed_key,
+                        target_qq_str,
+                        311,
+                        feed.get("likecnt"),
+                        feed.get("commentcnt"),
+                    )
+                    verified_tid = structured["tid"]
+                    identity = (str(self._uin), target_qq_str, str(verified_tid or feed_key))
+                    if identity in seen_feeds:
+                        continue
+                    seen_feeds.add(identity)
+                    try:
+                        abstime = int(feed.get("abstime") or 0)
+                    except (TypeError, ValueError):
+                        abstime = 0
+                    soup = bs4.BeautifulSoup(html_content, "html.parser")
+                    like_button = soup.find("a", class_="qz_like_btn_v3")
+                    liked = isinstance(like_button, Tag) and like_button.get("data-islike") == "1"
+                    feeds_list.append(
                         {
-                            "qq_account": qq_account,
-                            "nickname": nickname,
-                            "content": content,
-                            "comment_tid": comment_tid,
-                            "parent_tid": None,
+                            "target_qq": target_qq_str,
+                            "tid": verified_tid,
+                            "content": structured["content"],
+                            "content_complete": structured["content_complete"],
+                            "created_time": time.strftime(
+                                "%Y-%m-%d %H:%M:%S", time.localtime(abstime)
+                            ) if abstime > 0 else "",
+                            "images": structured["images"],
+                            "like_count": structured["like_count"],
+                            "comment_count": _as_count(
+                                feed.get("commentcnt"), feed.get("commentnum")
+                            ),
+                            "comments": _monitor_comments(soup),
+                            "comments_complete": False,
+                            "inline_replies_complete": False,
+                            "liked": liked,
+                            "html": html_content,
+                            "key": feed_key,
                         }
                     )
-
-                # 发布时间：JSON 顶层 abstime（Unix 秒），转成与 list_feeds 一致的
-                # "YYYY-MM-DD HH:MM:SS"，供 LLM 提示词 format_story_time 解析。
-                abstime_raw = feed.get("abstime", 0)
-                try:
-                    abstime = int(abstime_raw) if abstime_raw else 0
-                except (TypeError, ValueError):
-                    abstime = 0
-                created_time = (
-                    time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(abstime))
-                    if abstime > 0
-                    else ""
-                )
-
-                feeds_list.append(
-                    {
-                        "target_qq": target_qq_str,
-                        "tid": tid,
-                        "content": text,
-                        "created_time": created_time,
-                        "images": image_urls,
-                        "comments": monitor_comments,
-                        "liked": liked,
-                    }
-                )
+                    if len(feeds_list) >= num:
+                        break
+                if len(feeds_list) >= num or not has_more:
+                    break
+                next_state = next_feed_state(main, state)
+                next_position = feed_position(next_state)
+                if next_position in seen_positions:
+                    raise RuntimeError("好友动态分页游标未推进")
+                seen_positions.add(next_position)
+                state = next_state
+                if page_number == page_budget and len(feeds_list) < num:
+                    raise RuntimeError("好友动态分页超出本次读取预算")
 
             logger.info(
                 f"[#F38BA8]监控发现 [#CBA6F7]{len(feeds_list)}[/#CBA6F7]"
@@ -533,4 +619,4 @@ class FeedsMixin(QZoneClientBase):
             raise
         except Exception as e:
             logger.error(f"监控好友动态失败: {e}")
-            return []
+            raise

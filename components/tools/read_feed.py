@@ -1,6 +1,6 @@
 """ReadFeedTool：读取 QQ 空间说说的 Tool 组件。
 
-供外部 Chatter 通过 LLM tool calling 调用，返回指定 QQ 用户的说说列表及完整评论内容。
+供外部 Chatter 通过 LLM tool calling 调用，返回指定 QQ 用户的说说及评论完整性状态。
 """
 
 from __future__ import annotations
@@ -48,14 +48,27 @@ class ReadFeedTool(BaseTool):
             return False, f"'{target_qq}' 不是有效的 QQ 号，请提供纯数字 QQ 号。"
 
         num = max(1, min(num, 20))
-        feeds = await service.list_feeds(target_qq=target_qq, num=num, skip_commented=False)
-        if not feeds:
+        listed_feeds = await service.list_feeds(
+            target_qq=target_qq,
+            num=num,
+            skip_commented=False,
+            paginate_comments=False,
+        )
+        if not listed_feeds:
             return True, f"QQ {target_qq} 的空间暂无说说或无法访问。"
+
+        feeds: list[dict[str, Any]] = []
+        for listed in listed_feeds:
+            feed_id = str(listed.get("tid") or "")
+            detail = await service.get_feed_detail(target_qq, feed_id) if feed_id else None
+            feeds.append({**listed, **(detail or {})})
 
         # 收集所有图片 URL，批量识别（有缓存则直接复用）
         all_image_urls: list[str] = []
         for feed in feeds:
-            all_image_urls.extend(str(u) for u in feed.get("images", []) if u)
+            images = feed.get("images")
+            if isinstance(images, list):
+                all_image_urls.extend(str(url) for url in images if url)
         image_descs: dict[str, str] = {}
         if all_image_urls:
             image_descs = await service.describe_images(all_image_urls)
@@ -70,10 +83,26 @@ class ReadFeedTool(BaseTool):
     def _format_feed(idx: int, feed: dict[str, Any], image_descs: dict[str, str] | None = None) -> str:
         """将单条说说格式化为包含评论的完整文本块。"""
         tid = str(feed.get("tid", ""))
-        content = str(feed.get("content") or feed.get("rt_con") or "（无正文）").strip()
+        content = str(feed.get("content") or "（无正文）").strip()
         created_time = str(feed.get("created_time", "")).strip()
-        images: list[str] = feed.get("images", [])
-        comments: list[dict[str, Any]] = feed.get("comments", [])
+        raw_images = feed.get("images")
+        images = raw_images if isinstance(raw_images, list) else []
+        raw_comments = feed.get("comments")
+        comments = raw_comments if isinstance(raw_comments, list) else []
+        comments_complete = feed.get("comments_complete")
+        inline_replies_complete = feed.get("inline_replies_complete")
+        content_complete = feed.get("content_complete")
+        content_status = (
+            str(content_complete) if isinstance(content_complete, bool) else "未知"
+        )
+        comments_status = (
+            str(comments_complete) if isinstance(comments_complete, bool) else "未知"
+        )
+        replies_status = (
+            str(inline_replies_complete)
+            if isinstance(inline_replies_complete, bool)
+            else "未知"
+        )
 
         parts: list[str] = []
         header = f"【说说 {idx}】"
@@ -83,6 +112,9 @@ class ReadFeedTool(BaseTool):
             header += f"  (tid={tid})"
         parts.append(header)
         parts.append(f"内容：{content}")
+        parts.append(f"正文完整={content_status}")
+        if feed.get("rt_con"):
+            parts.append(f"转发引用（非当前正文）：{feed['rt_con']}")
 
         if images:
             descs = image_descs or {}
@@ -94,7 +126,17 @@ class ReadFeedTool(BaseTool):
                     parts.append(f"图片{i}：（内容未识别）")
 
         if comments:
-            parts.append(f"评论（共 {len(comments)} 条）：")
+            visible_count = len(comments)
+            server_count = feed.get("comment_count", feed.get("comment_total"))
+            count_label = (
+                f"服务端 {server_count} 条，当前可见 {visible_count} 条"
+                if server_count is not None
+                else f"服务端数量未知，当前可见 {visible_count} 条"
+            )
+            parts.append(
+                f"评论（{count_label}；一级评论完整={comments_status}；"
+                f"楼中楼完整={replies_status}）："
+            )
             for comment in comments:
                 nickname = str(comment.get("nickname", "")).strip() or "匿名"
                 qq = str(comment.get("qq_account", "")).strip()
@@ -109,11 +151,26 @@ class ReadFeedTool(BaseTool):
                 if ctime:
                     line += f" {ctime}"
                 if ctid:
-                    line += f" (ctid={ctid})"
+                    line += f" (comment_id={ctid}, comment_uin={qq or '?'})"
+                parent_id = comment.get("parent_comment_id")
+                if parent_id is None:
+                    parent_id = comment.get("parent_tid")
+                if parent_id is not None and str(parent_id) != "":
+                    parent_uin = comment.get("parent_comment_uin")
+                    line += (
+                        f" (parent_comment_id={parent_id}, "
+                        f"parent_comment_uin={parent_uin if parent_uin is not None else '?'})"
+                    )
                 line += f"：{ctext}"
                 parts.append(line)
         else:
-            parts.append("评论：暂无")
+            server_count = feed.get("comment_count", feed.get("comment_total"))
+            server_count_label = "未知" if server_count is None else str(server_count)
+            parts.append(
+                f"评论：当前未见评论（服务端数量={server_count_label}；"
+                f"一级评论完整={comments_status}；"
+                f"楼中楼完整={replies_status}）"
+            )
 
         parts.append("")  # 空行分隔
         return "\n".join(parts)

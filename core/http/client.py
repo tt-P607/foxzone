@@ -22,7 +22,7 @@ logger = get_logger("foxzone.api_client", color=COLOR.ORANGE)
 ZONE_LIST_URL = "https://user.qzone.qq.com/proxy/domain/ic2.qzone.qq.com/cgi-bin/feeds/feeds3_html_more"
 EMOTION_PUBLISH_URL = "https://user.qzone.qq.com/proxy/domain/taotao.qzone.qq.com/cgi-bin/emotion_cgi_publish_v6"
 DOLIKE_URL = "https://user.qzone.qq.com/proxy/domain/w.qzone.qq.com/cgi-bin/likes/internal_dolike_app"
-# 评论与楼中楼回复共用同一端点（emotion_cgi_re_feeds），以表单字段区分行为。
+# 普通评论端点；楼中楼回复使用独立的 addreply_ugc 协议。
 COMMENT_URL = "https://user.qzone.qq.com/proxy/domain/taotao.qzone.qq.com/cgi-bin/emotion_cgi_re_feeds"
 LIST_URL = "https://user.qzone.qq.com/proxy/domain/taotao.qq.com/cgi-bin/emotion_cgi_msglist_v6"
 # 单条说说详情（按 tid 精确查询，含评论区 list_3 楼中楼），当前评论拉取主接口

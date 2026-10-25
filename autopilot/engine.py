@@ -14,7 +14,7 @@ from typing import Any, Awaitable, Callable
 
 from src.app.plugin_system.api.log_api import COLOR, get_logger
 
-from ..core.http.comments import QZoneRateLimitError
+from ..core.http.comments import QZoneRateLimitError, QZoneUnknownResultError
 
 logger = get_logger("foxzone.batch_engine", color=COLOR.ORANGE)
 
@@ -56,6 +56,7 @@ class BatchResult:
 
     succeeded: int = 0
     skipped: int = 0
+    unknown: int = 0
     rate_limited: bool = False
     lines: list[str] = field(default_factory=list)
 
@@ -83,6 +84,7 @@ class BatchSendEngine:
         on_success: ItemHook | None = None,
         on_rate_limited: ItemHook | None = None,
         on_finally: ItemHook | None = None,
+        on_unknown: ItemHook | None = None,
     ) -> BatchResult:
         """执行批量发送。
 
@@ -105,6 +107,7 @@ class BatchSendEngine:
             on_success: 发送成功后的回调（如标记互动、递增计数）
             on_rate_limited: 限流跳过时的回调（如标记已处理避免重复触发）
             on_finally: 每项收尾回调（无论成败均执行）
+            on_unknown: 结果待核实时的回调；不触发成功或通用收尾回调
 
         Returns:
             批量执行结果
@@ -130,6 +133,7 @@ class BatchSendEngine:
 
                 ok = False
                 rate_limited = False
+                unknown = False
                 last_err: Exception | None = None
                 for attempt in range(self._policy.max_attempts):
                     try:
@@ -137,6 +141,11 @@ class BatchSendEngine:
                         if ok:
                             break
                         last_err = None
+                    except QZoneUnknownResultError as exc:
+                        last_err = exc
+                        unknown = True
+                        logger.warning(f"发送结果待核实，禁止重发 {item_label}: {exc}")
+                        break
                     except RuntimeError as exc:
                         # 不可重试错误（cookie 失效 / QZone 限流）
                         last_err = exc
@@ -159,6 +168,13 @@ class BatchSendEngine:
                         await asyncio.sleep(backoff)
 
                 sent_so_far += 1
+
+                if unknown:
+                    result.unknown += 1
+                    result.lines.append(f"· {item_label} → 结果待核实")
+                    if on_unknown is not None:
+                        await on_unknown(item)
+                    continue
 
                 if ok:
                     result.succeeded += 1

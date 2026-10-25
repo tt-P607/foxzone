@@ -64,8 +64,9 @@ COMMENT_REPLY_BATCH: str = (
     "__GUIDELINES__\n\n"
     "**输出格式（JSON 数组）：**\n"
     "只输出合法 JSON 数组，不含任何前缀、后缀或 Markdown 代码块。\n"
+    "comment_index 是上方评论项序号（从 1 开始），必须原样使用；不要输出评论 ID 或说说 ID。\n"
     "reply=null 表示不回复该评论；非 null 则填写回复正文。\n"
-    '[{{"comment_tid": "评论ID", "feed_id": "说说ID", "reply": "回复内容或 null"}}]'
+    '[{{"comment_index": 1, "reply": "回复内容或 null"}}]'
 )
 
 #: 好友说说互动决策模板（foxzone.friend.feed.interact）：点赞 + 评论。
@@ -111,8 +112,8 @@ FRIEND_FEED_INTERACT: str = (
     "（楼中楼子回复），回复不是必须；\n"
     "- ``reply_to`` 与 ``comment`` 互斥：要么评论说说本体，要么回复某条评论，"
     "两者只选一个；\n"
-    "- 回复他人评论时，把 ``reply_to_qq`` 设为被回复者 QQ，``reply_to`` 填回复正文，"
-    "字数仍按 GUIDELINES 控制；\n"
+    "- 回复他人评论时，reply_comment_index 必须填写评论区中目标评论的序号（从 1 开始），"
+    "reply_to 填回复正文；不回复时 reply_comment_index 与 reply_to 均为 null；\n"
     "- 不要回复每条评论，只回复真正有话说、适合接话的那一两条。\n"
     "\n"
     "# 情绪匹配\n"
@@ -127,10 +128,10 @@ FRIEND_FEED_INTERACT: str = (
     "只输出合法 JSON 数组，不含任何前缀、后缀或 Markdown 代码块。\n"
     "like=true 表示点赞、false 表示不点赞；comment=null 表示不评论，"
     "非 null 则填写评论正文。reply_to=null 表示不回复他人评论；"
-    "若 reply_to 非 null，则 reply_to_qq 为被回复者 QQ、reply_to 为回复正文"
+    "若 reply_to 非 null，则 reply_comment_index 为评论区目标序号、reply_to 为回复正文"
     "（comment 须为 null）。\n"
     '[{{"tid": "说说ID", "target_qq": "QQ号", "like": true或false, '
-    '"comment": "评论内容或 null", "reply_to_qq": "被回复者QQ或null", '
+    '"comment": "评论内容或 null", "reply_comment_index": 正整数或 null, '
     '"reply_to": "回复内容或 null"}}]\n'
     "</output_format>"
 )

@@ -11,8 +11,8 @@
 | 模块 | 说明 |
 |------|------|
 | **发布说说** | LLM 生成正文并发布 |
-| **读取动态** | 拉取自己/好友的最近说说，提取文本与图片描述供 LLM 使用 |
-| **评论与点赞** | 提供 `qzone_post_comment` / `qzone_like_feed` 工具供 LLM 自主调用 |
+| **读取动态** | 拉取自己/好友的最近说说，提取文本与图片描述供 LLM 使用；评论与内联楼中楼可能不完整 |
+| **评论与点赞** | 提供 `qzone_post_comment` / `qzone_like_feed` 工具供 LLM 自主调用；评论工具也支持带完整父级身份的精确回复 |
 | **自动回复** | 轮询自己说说下的评论，LLM 批量决策回复内容并发送 |
 | **好友动态监控** | 周期性扫描好友 timeline，由 LLM 逐条决策是否点赞/评论（默认 AI 自主决定，可开启始终点赞） |
 | **外部接力回复** | 检查 Bot 在他人说说下评论后，是否有人回复 Bot 的评论；命中则继续接力（默认关闭） |
@@ -39,7 +39,7 @@
 | `service` | `qzone_service` | QQ 空间原子能力出口（发布 / 读取 / 评论 / 点赞 / 回复 / 识图） |
 | `command` | `foxzone` | 管理命令（`/foxzone send [主题]`） |
 | `tool` | `qzone_read_feed` | 读取说说列表 |
-| `tool` | `qzone_post_comment` | 发表评论 |
+| `tool` | `qzone_post_comment` | 发表评论或精确回复评论 |
 | `tool` | `qzone_like_feed` | 点赞 |
 | `config` | `config` | 插件配置（见下方「配置」） |
 
@@ -137,18 +137,26 @@ foxzone/
 ## 开发与测试
 
 ```bash
-# 单元测试
-uv run pytest test/plugins/foxzone -q
+# 从 Neo-MoFox 仓库根目录运行 FoxZone 离线测试
+uv run --no-sync python -m pytest -o addopts= -p no:cacheprovider plugins/foxzone/test -q
 
 # 类型与风格检查
 uv tool run ruff check plugins/foxzone
 ```
 
-测试位于仓库根 `test/plugins/foxzone/`。
+测试位于插件目录 `plugins/foxzone/test/`。这些测试使用替身验证请求构造与处理逻辑，不代表真实 QQ 投递或服务端展示结果。
+
+### 读取与回复边界
+
+- 说说详情按 `pos` / `num` 有界分页一级评论并去重；短页不代表结束。`comment_total` / `comment_count` 是服务端统计，`comments` 是当前读到的扁平项数。`comments_complete` 只描述一级评论是否达到服务端总数，不代表 `list_3` 楼中楼完整；`inline_replies_complete` 当前为 `false`。
+- LLM 的 `comment_index` 与好友动态的 `reply_comment_index` 都是本次输入列表中从 1 开始的序号，并映射回本次评论身份。好友动态选择评论回复目标后，会在写入前重新读取详情并核实身份唯一；目标不唯一或父级身份不足时不会发送。
+- `qzone_post_comment` 的精确回复参数为 `comment_id`、`comment_uin`；二级回复还需提供 `parent_comment_id`、`parent_comment_uin`。参数必须成对且与当前说说评论身份匹配。
+- 网络断线、无效回执或缺少新回复 ID 时结果按待核实处理，不报告成功或普通失败来诱发重发；待核实状态按账号、说说主人、父评论及作者作用域保存在 `reply_tracker`。旧版无作用域记录保留为 `legacy`，不推断其账号或评论归属。
+- 好友动态每轮从首页重新读取，不复用长游标；图片只收集当前响应中按原图优先的合法 HTTP(S) URL，不保证完整相册或超过 9 张图片的覆盖。长正文及评论树完整性以返回状态为准。
 
 ### 文档索引
 
-- [`QZONE_API.md`](QZONE_API.md) — 接口端点、参数、Cookie 流程、外部回查实现要点（msgdetail_v6 严格参数、`-10049` 限流处理、发送串行化等）
+- [`QZONE_API.md`](QZONE_API.md) — 接口端点、参数、Cookie 流程、详情分页与评论身份、待核实回执及限流处理
 - `plans/refactor_foxzone.md`（仓库根）— 架构设计与重构记录
 - [`CHANGELOG.md`](CHANGELOG.md) — 关键功能演进记录
 

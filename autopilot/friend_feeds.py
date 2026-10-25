@@ -12,6 +12,8 @@ from typing import Any
 
 from src.app.plugin_system.api.log_api import COLOR, get_logger
 
+from ..core.comment_tree import comment_identity, opaque_id, reply_target
+from ..core.http.comments import QZoneUnknownResultError
 from ..core.interaction_log import ACTION_COMMENT, ACTION_LIKE, ACTION_READ, SOURCE_POLL
 from ..core.llm import log_llm_prompt
 from ..core.llm.vision import fill_image_text
@@ -54,12 +56,17 @@ async def friend_monitor_once(runtime: "QZoneRuntime", num_feeds: int) -> None:
         f" 条候选动态，开始逐条过滤…[/#F38BA8]"
     )
     candidate_feeds: list[dict[str, Any]] = []
+    account_qq = str(await runtime.bot_qq())
     for feed in feeds:
         target_qq: str = str(feed.get("target_qq", "")).strip()
-        tid: str = str(feed.get("tid", "")).strip()
+        tid = opaque_id(feed.get("tid")).strip()
 
         if not target_qq or not tid:
-            logger.debug(f"好友说说监控：跳过无 target_qq/tid 的 feed: {feed}")
+            logger.debug("好友说说监控：跳过缺少可核实主人或说说 ID 的动态")
+            continue
+
+        if runtime.reply_tracker.is_comment_pending(account_qq, target_qq, tid):
+            logger.warning(f"好友说说监控：普通评论结果待核实，跳过 (tid={tid})")
             continue
 
         # 已处理（点赞/评论/仅读）则跳过；注意先判断 has_seen，避免把外部同步
@@ -92,6 +99,34 @@ async def friend_monitor_once(runtime: "QZoneRuntime", num_feeds: int) -> None:
 
     cfg = runtime.config
     feed_items: list[dict[str, Any]] = []
+
+    for feed in candidate_feeds:
+        if feed.get("content_complete") is True and not feed.get("comments"):
+            continue
+        target_qq = str(feed["target_qq"])
+        tid = opaque_id(feed["tid"])
+        try:
+            detail = await runtime.with_client(
+                lambda client, qq=target_qq, post=tid, has_comments=bool(feed.get("comments")): client.fetch_feed_detail(
+                    qq, post, paginate_comments=has_comments
+                )
+            )
+        except Exception as exc:
+            logger.warning(f"好友说说详情补全失败，保留原始完整性状态 (tid={tid}): {exc}")
+            continue
+        if detail is None or opaque_id(detail.get("tid")) != tid:
+            continue
+        if isinstance(detail.get("content"), str) and detail["content"]:
+            feed["content"] = detail["content"]
+            feed["content_complete"] = detail.get("content_complete")
+        if detail.get("images") is not None:
+            feed["images"] = list(dict.fromkeys([*(feed.get("images") or []), *detail["images"]]))
+        if isinstance(detail.get("comments"), list):
+            feed["comments"] = detail["comments"]
+            feed["comments_complete"] = detail.get("comments_complete", False)
+            feed["inline_replies_complete"] = detail.get("inline_replies_complete", False)
+        if detail.get("comment_count") is not None:
+            feed["comment_count"] = detail["comment_count"]
 
     if cfg.monitor.always_like:
         # ── 始终点赞模式：先批量点赞 + 标记 LIKE，仅成功者进入 LLM 决策 ──
@@ -150,23 +185,27 @@ def _to_feed_item(feed: dict[str, Any]) -> dict[str, Any]:
         or str(feed.get("host_uin", "")).strip()
     )
     tid = str(feed.get("tid", "")).strip()
-    content_text = str(feed.get("content") or feed.get("rt_con") or "（无正文）").strip()
+    content_text = feed.get("content")
     created_time = str(feed.get("created_time", "")).strip()
-    images: list[str] = [str(u) for u in feed.get("images", []) if u]
-    comments: list[dict[str, Any]] = feed.get("comments", [])
+    images = feed.get("images")
+    comments: list[dict[str, Any]] = feed.get("comments", []) or []
     liked: bool = bool(feed.get("liked"))
 
-    image_lines: list[str] = [f"图片{j}：[待识别]" for j in range(1, len(images) + 1)]
+    image_lines: list[str] = [f"图片{j}：[待识别]" for j in range(1, len(images or []) + 1)]
 
     return {
         "tid": tid,
         "target_qq": target_qq,
         "content": content_text,
+        "content_complete": feed.get("content_complete"),
         "created_time": created_time,
         "image_text": "\n".join(image_lines),
         "images": images,
         "comments": comments,
-        "comment_count": len(comments),
+        "comment_count": feed.get("comment_count"),
+        "comments_complete": feed.get("comments_complete", False),
+        "inline_replies_complete": feed.get("inline_replies_complete", False),
+        "like_count": feed.get("like_count"),
         "liked": liked,
     }
 
@@ -215,8 +254,10 @@ async def process_feed_monitor_batch(
         logger.error(f"批量生成好友说说互动决策时发生异常: {exc}")
         return {"liked": 0, "commented": 0, "replied": 0, "decisions": {}}
 
-    decision_map: dict[str, dict[str, Any]] = {
-        d["tid"]: d for d in feed_decisions if d.get("tid")
+    account_qq = str(await runtime.bot_qq())
+    decision_map: dict[tuple[str, str], dict[str, Any]] = {
+        (str(d["target_qq"]), str(d["tid"])): d
+        for d in feed_decisions if d.get("tid") and d.get("target_qq")
     }
     for tid, d in decision_map.items():
         logger.debug(
@@ -230,7 +271,7 @@ async def process_feed_monitor_batch(
         for item in feed_items:
             tid = str(item.get("tid", ""))
             target_qq = str(item.get("target_qq", ""))
-            decision = decision_map.get(tid) or {}
+            decision = decision_map.get((target_qq, tid)) or {}
             if runtime.interaction_log.has_liked(target_qq, tid):
                 # 本地 json 已记录点赞：跳过重复点赞
                 logger.debug(
@@ -268,7 +309,7 @@ async def process_feed_monitor_batch(
     comment_items: list[dict[str, Any]] = []
     for item in feed_items:
         tid = str(item.get("tid", ""))
-        decision = decision_map.get(tid) or {}
+        decision = decision_map.get((str(item.get("target_qq", "")), tid)) or {}
         if decision.get("comment"):
             logger.debug(
                 f"好友说说：决策评论 (qq={item.get('target_qq')} tid={tid} "
@@ -289,12 +330,15 @@ async def process_feed_monitor_batch(
     def _should_send(item: dict[str, Any]) -> bool:
         tid = str(item.get("tid", ""))
         target_qq = str(item.get("target_qq", ""))
-        return bool(tid and target_qq and decision_map.get(tid, {}).get("comment"))
+        return bool(
+            tid and target_qq and decision_map.get((target_qq, tid), {}).get("comment")
+            and not runtime.reply_tracker.is_comment_pending(account_qq, target_qq, tid)
+        )
 
     async def _sender(item: dict[str, Any]) -> bool:
         tid = str(item.get("tid", ""))
         target_qq = str(item.get("target_qq", ""))
-        comment_text = decision_map.get(tid, {}).get("comment") or ""
+        comment_text = decision_map.get((target_qq, tid), {}).get("comment") or ""
         return await runtime.with_client(
             lambda client: client.comment(target_qq, tid, comment_text.strip())
         )
@@ -302,7 +346,7 @@ async def process_feed_monitor_batch(
     async def _on_success(item: dict[str, Any]) -> None:
         tid = str(item.get("tid", ""))
         target_qq = str(item.get("target_qq", ""))
-        comment_text = decision_map.get(tid, {}).get("comment")
+        comment_text = decision_map.get((target_qq, tid), {}).get("comment")
         runtime.interaction_log.mark(target_qq, tid, ACTION_COMMENT, SOURCE_POLL)
         await runtime.interaction_log.save()
         content_preview = truncate_preview(str(item.get("content", "") or "（无正文）"))
@@ -315,26 +359,29 @@ async def process_feed_monitor_batch(
     def _label(item: dict[str, Any]) -> str:
         return f"[qq={item.get('target_qq', '')} tid={item.get('tid', '')}]"
 
+    async def _on_unknown(item: dict[str, Any]) -> None:
+        await runtime.reply_tracker.mark_comment_pending(
+            account_qq, str(item["target_qq"]), str(item["tid"])
+        )
+
     result = await engine.run(
         comment_items,
         sender=_sender,
         should_send=_should_send,
         label=_label,
         on_success=_on_success,
+        on_unknown=_on_unknown,
     )
 
-    # ── 按决策回复他人评论（reply_to，楼中楼子回复）──
-    # 监控流的 HTML 评论不含顶层父级信息，回复前必须先 fetch_feed_detail
-    # 精准拉取完整评论树，用 reply_to_qq 定位目标评论，取其 parent_tid
-    # （即顶层一级评论 tid）作为 commentId 提交 reply。
     replied_count = 0
+    unknown_count = result.unknown
     for item in feed_items:
         tid = str(item.get("tid", ""))
         target_qq = str(item.get("target_qq", ""))
-        decision = decision_map.get(tid) or {}
+        decision = decision_map.get((target_qq, tid)) or {}
         reply_text = str(decision.get("reply_to") or "").strip()
-        reply_qq = str(decision.get("reply_to_qq") or "").strip()
-        if not (tid and target_qq and reply_text and reply_qq):
+        selected_key = decision.get("reply_comment_key")
+        if not (tid and target_qq and reply_text and selected_key):
             continue
 
         try:
@@ -350,37 +397,46 @@ async def process_feed_monitor_batch(
         all_comments: list[dict[str, Any]] = list(
             (detail or {}).get("comments", []) or []
         )
-        # 定位目标评论（按 qq_account 匹配，取第一条）
-        target_comment: dict[str, Any] | None = None
-        for c in all_comments:
-            if str(c.get("qq_account", "") or "") == reply_qq:
-                target_comment = c
-                break
-        if target_comment is None:
+        matches = [comment for comment in all_comments if comment_identity(comment) == selected_key]
+        if len(matches) != 1:
             logger.warning(
-                f"好友说说：未找到评论者 {reply_qq} 的评论，跳过回复 (tid={tid})"
+                f"好友说说：选定评论身份无法唯一核实，跳过回复 (tid={tid})"
             )
             continue
 
-        comment_tid = str(target_comment.get("comment_tid", "") or "")
-        parent_tid = str(target_comment.get("parent_tid", "") or "")
-        root_tid = parent_tid or comment_tid  # 顶层一级评论 tid 作 commentId
-        target_name = str(target_comment.get("nickname", "") or "未知用户")
-        if not (comment_tid and root_tid):
-            logger.warning(f"好友说说：目标评论缺少 tid，跳过回复 (tid={tid})")
+        target_comment = matches[0]
+        target = reply_target(target_comment, all_comments)
+        comment_tid = opaque_id(target_comment.get("comment_tid"))
+        reply_qq = opaque_id(target_comment.get("qq_account"))
+        target_name = str(target_comment.get("nickname") or "").strip()
+        if not target or not (comment_tid and reply_qq and target_name):
+            logger.warning(f"好友说说：目标评论缺少可靠身份，跳过回复 (tid={tid})")
             continue
-
+        root_tid, parent_author = target
+        scope = {
+            "account_qq": account_qq,
+            "host_qq": target_qq,
+            "parent_comment_id": root_tid,
+            "parent_comment_uin": parent_author,
+            "comment_uin": reply_qq,
+        }
         try:
-            ok = await runtime.with_client(
-                lambda client: client.reply(
-                    tid,
-                    target_qq,
-                    target_name,
-                    reply_text,
-                    root_tid,
-                    reply_qq,
+            async with runtime.reply_send_lock:
+                if runtime.reply_tracker.is_blocked(tid, comment_tid, **scope):
+                    continue
+                ok = await runtime.with_client(
+                    lambda client: client.reply(
+                        tid, target_qq, target_name, reply_text, root_tid, reply_qq,
+                        parent_comment_uin=parent_author,
+                    )
                 )
-            )
+                if ok:
+                    await runtime.reply_tracker.mark_as_replied(tid, comment_tid, **scope)
+        except QZoneUnknownResultError as exc:
+            await runtime.reply_tracker.mark_pending(tid, comment_tid, **scope)
+            unknown_count += 1
+            logger.warning(f"好友说说：回复结果待核实，禁止自动重发 (tid={tid}): {exc}")
+            continue
         except Exception as exc:
             logger.error(f"好友说说：回复评论异常 (qq={target_qq} tid={tid}): {exc}")
             continue
@@ -393,7 +449,6 @@ async def process_feed_monitor_batch(
 
         # 标记互动（comment 使该 feed 进入外部回查）+ 回复跟踪防重复
         runtime.interaction_log.mark(target_qq, tid, ACTION_COMMENT, SOURCE_POLL)
-        await runtime.reply_tracker.mark_as_replied(tid, comment_tid)
         await runtime.interaction_log.save()
         replied_count += 1
         logger.info(
@@ -408,6 +463,9 @@ async def process_feed_monitor_batch(
         tid = str(item.get("tid", ""))
         target_qq = str(item.get("target_qq", ""))
         if not (tid and target_qq):
+            continue
+        decision = decision_map.get((target_qq, tid))
+        if decision is None or decision.get("comment") or decision.get("reply_to") or decision.get("like"):
             continue
         if runtime.interaction_log.has_interacted(target_qq, tid):
             continue
@@ -434,5 +492,6 @@ async def process_feed_monitor_batch(
         "liked": liked_count,
         "commented": result.succeeded,
         "replied": replied_count,
+        "unknown": unknown_count,
         "decisions": decision_map,
     }

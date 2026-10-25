@@ -139,6 +139,13 @@ def parse_simple_json_text(response: str) -> str:
         return extract_text_from_broken_json(raw)
 
 
+def _positive_index(value: Any) -> int | None:
+    """只接受正整数序号，拒绝 bool 及其数值兼容值。"""
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        return None
+    return value
+
+
 def parse_batch_reply_decisions(response: str) -> list[dict[str, Any]]:
     """解析批量回复决策 JSON 数组。
 
@@ -146,8 +153,7 @@ def parse_batch_reply_decisions(response: str) -> list[dict[str, Any]]:
         response: LLM 原始响应文本
 
     Returns:
-        决策列表，每项保证含 comment_tid、feed_id 字段；
-        reply 字段为 None 或非空字符串。
+        决策列表，每项包含正整数 comment_index 和 None 或非空字符串 reply。
     """
     raw = strip_markdown_fence(response)
     try:
@@ -158,21 +164,27 @@ def parse_batch_reply_decisions(response: str) -> list[dict[str, Any]]:
             return []
 
         result: list[dict[str, Any]] = []
+        seen_indices: set[int] = set()
         for item in data:
             if not isinstance(item, dict):
                 continue
-            comment_tid = str(item.get("comment_tid", "")).strip()
-            feed_id = str(item.get("feed_id", "")).strip()
-            if not (comment_tid and feed_id):
+            comment_index = _positive_index(item.get("comment_index"))
+            if comment_index is None:
                 continue
+            if comment_index in seen_indices:
+                logger.warning("批量回复决策包含重复 comment_index。")
+                return []
+            seen_indices.add(comment_index)
             reply_raw = item.get("reply")
             if reply_raw is None:
                 reply: str | None = None
-            else:
-                reply = clean_reply(str(reply_raw))
+            elif isinstance(reply_raw, str):
+                reply = clean_reply(reply_raw)
                 if not reply:
-                    reply = None
-            result.append({"comment_tid": comment_tid, "feed_id": feed_id, "reply": reply})
+                    continue
+            else:
+                continue
+            result.append({"comment_index": comment_index, "reply": reply})
 
         return result
     except Exception as exc:
@@ -187,8 +199,8 @@ def parse_feed_decisions(response: str) -> list[dict[str, Any]]:
         response: LLM 原始响应文本
 
     Returns:
-        决策列表，每项保证含 tid、target_qq、like、comment、reply_to_qq、
-        reply_to 字段；``like`` 缺失时视为 False（默认不点赞）。
+        决策列表，每项保证含 tid、target_qq、like、comment、reply_to、
+        reply_comment_index 字段；``like`` 缺失时视为 False。
     """
     raw = strip_markdown_fence(response)
     try:
@@ -214,26 +226,28 @@ def parse_feed_decisions(response: str) -> list[dict[str, Any]]:
                 comment = clean_reply(str(comment_raw))
                 if not comment:
                     comment = None
-            reply_to_qq_raw = item.get("reply_to_qq")
-            reply_to_qq: str | None = None
-            if reply_to_qq_raw is not None:
-                reply_to_qq = str(reply_to_qq_raw).strip()
-                if not reply_to_qq:
-                    reply_to_qq = None
             reply_to_raw = item.get("reply_to")
             reply_to: str | None = None
             if reply_to_raw is not None:
-                reply_to = clean_reply(str(reply_to_raw))
+                if not isinstance(reply_to_raw, str):
+                    continue
+                reply_to = clean_reply(reply_to_raw)
                 if not reply_to:
-                    reply_to = None
+                    continue
+            reply_index_raw = item.get("reply_comment_index")
+            reply_comment_index: int | None = None
+            if reply_index_raw is not None:
+                reply_comment_index = _positive_index(reply_index_raw)
+                if reply_comment_index is None:
+                    continue
             result.append(
                 {
                     "tid": tid,
                     "target_qq": target_qq,
                     "like": like,
                     "comment": comment,
-                    "reply_to_qq": reply_to_qq,
                     "reply_to": reply_to,
+                    "reply_comment_index": reply_comment_index,
                 }
             )
 

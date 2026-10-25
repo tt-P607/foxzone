@@ -19,7 +19,9 @@ from src.app.plugin_system.api import storage_api
 from src.app.plugin_system.api.log_api import COLOR, get_logger
 from src.app.plugin_system.base import BaseService
 
-from ..core.interaction_log import SOURCE_AGENT
+from ..core.comment_tree import opaque_id, reply_target, resolve_comment
+from ..core.http.comments import QZoneUnknownResultError
+from ..core.interaction_log import ACTION_COMMENT, SOURCE_AGENT
 from ..core.llm.vision import describe_images
 
 if typing.TYPE_CHECKING:
@@ -112,7 +114,7 @@ class QZoneService(BaseService):
         skip_commented: bool = True,
         paginate_comments: bool = True,
     ) -> list[dict[str, Any]]:
-        """读取指定 QQ 的说说列表（含全部评论，自动分页补全）。
+        """读取指定 QQ 的说说和有界评论页，保留完整性状态。
 
         Args:
             target_qq: 目标 QQ 号
@@ -140,16 +142,16 @@ class QZoneService(BaseService):
         return feeds or []
 
     async def list_own_feeds_with_comments(self, num: int = 5) -> list[dict[str, Any]]:
-        """读取自己的说说及全部评论。"""
+        """读取自己的说说及可见评论，保留完整性状态。"""
         return await self.list_feeds(await self._rt.bot_qq(), num=num, skip_commented=False)
 
     async def get_feed_detail(
         self, host_qq: str, feed_id: str
     ) -> dict[str, Any] | None:
-        """精确拉取单条说说完整详情（正文+图片+评论）。
+        """精确读取单条说说的正文、图片和有界评论页。
 
-        基于 ``emotion_cgi_msgdetail_v6``，一次请求拿到 feed 全貌；
-        用于「外部空间评论回查」按 InteractionLog 标记精准命中。
+        基于 ``emotion_cgi_msgdetail_v6``，分页接续一级评论；
+        ``list_3`` 只包含服务端内联返回的楼中楼。
         """
         try:
             return await self._rt.with_client(
@@ -164,10 +166,10 @@ class QZoneService(BaseService):
     async def get_feed_comments(
         self, host_qq: str, feed_id: str
     ) -> list[dict[str, Any]]:
-        """精确拉取单条说说的评论（含 list_3 楼中楼回复）。
+        """兼容接口：投影单条说说详情中当前可见的评论。
 
-        使用 ``emotion_cgi_msgdetail_v6`` 接口按 tid 精准查询，
-        1 个请求即可获得完整评论区。
+        评论分页可能部分完成；需要完整性状态的消费者应调用
+        :meth:`get_feed_detail`。
 
         Args:
             host_qq: 说说主人 QQ 号
@@ -185,7 +187,7 @@ class QZoneService(BaseService):
         """获取好友动态流（用于好友说说自动监控）。
 
         返回的每项包含 target_qq, tid, content, images, comments 等字段。
-        只返回未点赞的说说（monitor_list_feeds 内部已过滤已点赞项）。
+        ``liked`` 保留实际点赞状态，由上层过滤已处理动态。
 
         Args:
             num: 最多获取的好友说说数量
@@ -207,17 +209,33 @@ class QZoneService(BaseService):
     # ------------------------------------------------------------------
 
     async def comment(self, target_qq: str, feed_id: str, text: str) -> bool:
-        """评论指定说说。"""
+        """串行发表评论，并记录明确成功或待核实状态。"""
         if not text.strip():
             return False
 
-        try:
-            return await self._rt.with_client(
-                lambda client: client.comment(str(target_qq), str(feed_id), text.strip())
-            )
-        except Exception as exc:
-            logger.error(f"评论说说失败: {exc}")
+        host_qq = str(target_qq)
+        post_id = str(feed_id)
+        account_qq = await self._rt.bot_qq()
+        if not account_qq or not host_qq or not post_id:
             return False
+        tracker = self._rt.reply_tracker
+        async with self._rt.reply_send_lock:
+            if tracker.is_comment_pending(account_qq, host_qq, post_id):
+                raise QZoneUnknownResultError("该说说已有待核实评论，禁止再次发送")
+            try:
+                success = await self._rt.with_client(
+                    lambda client: client.comment(host_qq, post_id, text.strip())
+                )
+            except QZoneUnknownResultError:
+                await tracker.mark_comment_pending(account_qq, host_qq, post_id)
+                raise
+            except RuntimeError as exc:
+                logger.error(f"评论说说失败: {exc}")
+                return False
+
+            if success:
+                await self.mark_interaction(host_qq, post_id, ACTION_COMMENT, SOURCE_AGENT)
+            return bool(success)
 
     async def like(self, target_qq: str, feed_id: str) -> bool:
         """点赞指定说说。"""
@@ -233,36 +251,123 @@ class QZoneService(BaseService):
         self,
         feed_id: str,
         host_qq: str,
-        target_name: str,
-        reply_text: str,
-        comment_tid: str,
+        target_name: str = "",
+        reply_text: str = "",
+        comment_tid: str = "",
         commenter_qq: str = "",
+        *,
+        comment_uin: str = "",
+        parent_comment_id: str = "",
+        parent_comment_uin: str = "",
     ) -> bool:
-        """回复指定评论。
+        """唯一核验目标评论后，串行回复并记录作用域状态。
+
+        ``target_name`` 保留位置参数契约；实际提及昵称从核验后的详情读取。
+        ``commenter_qq`` 与关键字 ``comment_uin`` 均表示实际目标作者。
 
         Raises:
-            RuntimeError: 不可重试错误（cookie 失效 / -10049 限流），
-                向上传播供批量处理器停止重试。
+            QZoneUnknownResultError: 写入结果未知或目标已有待核实写入
+            RuntimeError: 明确服务端拒绝
         """
         if not reply_text.strip():
             return False
 
-        try:
-            return await self._rt.with_client(
-                lambda client: client.reply(
-                    str(feed_id),
-                    str(host_qq),
-                    target_name,
-                    reply_text.strip(),
-                    str(comment_tid),
-                    str(commenter_qq),
-                )
-            )
-        except RuntimeError:
-            raise
-        except Exception as exc:
-            logger.error(f"回复评论失败: {exc}")
+        post_id = str(feed_id)
+        host = str(host_qq)
+        target_id = opaque_id(comment_tid)
+        target_author = opaque_id(comment_uin or commenter_qq)
+        if comment_uin and commenter_qq and str(comment_uin) != str(commenter_qq):
             return False
+        parent_id = opaque_id(parent_comment_id)
+        parent_author = opaque_id(parent_comment_uin)
+        if not target_id or not target_author or bool(parent_id) != bool(parent_author):
+            return False
+
+        account_qq = await self._rt.bot_qq()
+        if not account_qq or not host or not post_id:
+            return False
+        tracker = self._rt.reply_tracker
+        scope = {
+            "account_qq": account_qq,
+            "host_qq": host,
+            "parent_comment_id": parent_id or target_id,
+            "parent_comment_uin": parent_author or target_author,
+            "comment_uin": target_author,
+        }
+        async with self._rt.reply_send_lock:
+            status = tracker.get_status(post_id, target_id, **scope)
+            if status == "pending":
+                raise QZoneUnknownResultError("该评论已有待核实回复，禁止再次发送")
+            if status in {"replied", "skipped", "legacy"}:
+                return False
+
+            detail = await self.get_feed_detail(host, post_id)
+            comments = detail.get("comments", []) if detail else []
+            if not isinstance(comments, list):
+                return False
+            target = resolve_comment(
+                comments,
+                target_id,
+                parent_comment_id=parent_id,
+                comment_uin=target_author,
+                parent_comment_uin=parent_author,
+            )
+            if target is None:
+                return False
+            raw_parent_id = target.get("parent_comment_id")
+            if raw_parent_id is None:
+                raw_parent_id = target.get("parent_tid")
+            if opaque_id(raw_parent_id) and not parent_id:
+                return False
+            actual_parent = reply_target(target, comments)
+            if actual_parent is None:
+                return False
+            actual_parent_id, actual_parent_author = actual_parent
+            if (parent_id and parent_id != actual_parent_id) or (
+                parent_author and parent_author != actual_parent_author
+            ):
+                return False
+
+            actual_scope = {
+                **scope,
+                "parent_comment_id": actual_parent_id,
+                "parent_comment_uin": actual_parent_author,
+            }
+            actual_status = tracker.get_status(post_id, target_id, **actual_scope)
+            if actual_status == "pending":
+                raise QZoneUnknownResultError("该评论已有待核实回复，禁止再次发送")
+            if actual_status is not None:
+                return False
+
+            try:
+                result = await self._rt.with_client(
+                    lambda client: client.reply(
+                        post_id,
+                        host,
+                        str(target.get("nickname") or ""),
+                        reply_text.strip(),
+                        actual_parent_id,
+                        target_author,
+                        parent_comment_uin=actual_parent_author,
+                    )
+                )
+            except QZoneUnknownResultError:
+                await tracker.mark_pending(post_id, target_id, **actual_scope)
+                raise
+            except RuntimeError:
+                raise
+
+            reply_id = result.get("comment_id") if isinstance(result, dict) else None
+            valid_reply_id = (
+                isinstance(reply_id, int) and not isinstance(reply_id, bool) and reply_id >= 0
+                or isinstance(reply_id, str) and bool(reply_id.strip())
+            )
+            if not valid_reply_id:
+                await tracker.mark_pending(post_id, target_id, **actual_scope)
+                raise QZoneUnknownResultError("回复回执缺少新回复 ID，需先核实投递状态")
+            await tracker.mark_as_replied(post_id, target_id, **actual_scope)
+            await self.mark_interaction(host, post_id, ACTION_COMMENT, SOURCE_AGENT)
+            return True
 
     # ------------------------------------------------------------------
     # 状态代理（转发到 runtime）

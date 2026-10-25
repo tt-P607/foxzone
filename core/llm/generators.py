@@ -21,9 +21,14 @@ from typing import Any
 from src.app.plugin_system.api.llm_api import create_llm_request, get_model_set_by_task
 from src.app.plugin_system.api.log_api import COLOR, get_logger
 from src.app.plugin_system.api.prompt_api import get_template
-from src.app.plugin_system.types import Image, LLMPayload, PromptTemplate, ROLE, Text
+from src.app.plugin_system.types import ROLE, Image, LLMPayload, PromptTemplate, Text
 
-from .formatters import format_batch_comment_items, format_feed_items_block, format_self_feed
+from ..comment_tree import comment_identity, reply_item_key
+from .formatters import (
+    format_batch_comment_items,
+    format_feed_items_block,
+    format_self_feed,
+)
 from .parsers import (
     parse_batch_reply_decisions,
     parse_feed_decisions,
@@ -33,9 +38,10 @@ from .personality import get_now_info, get_personality_desc
 from .vision import describe_images, download_images_map
 
 if typing.TYPE_CHECKING:
+    from src.kernel.llm import ModelSet
+
     from ...config import FoxZoneConfig
     from ...runtime import QZoneRuntime
-    from src.kernel.llm import ModelSet
 
 logger = get_logger("foxzone.content_service", color=COLOR.ORANGE)
 
@@ -203,7 +209,7 @@ class ContentService:
         # 收集图片 URL 批量识别（带缓存）
         all_image_urls: list[str] = []
         for feed in feeds:
-            all_image_urls.extend(str(u) for u in feed.get("images", []) if u)
+            all_image_urls.extend(str(u) for u in feed.get("images") or [] if u)
         image_descs: dict[str, str] = {}
         if all_image_urls:
             try:
@@ -289,8 +295,8 @@ class ContentService:
                            story_time、comment_time、all_comments、feed_images
 
         Returns:
-            决策列表，每项为 ``{"comment_tid": str, "feed_id": str, "reply": str | None}``。
-            ``reply`` 为 None 或缺失时表示模型决定不回复该条评论。
+            决策列表绑定本轮输入评论身份，并含 target_key、comment_tid、feed_id
+            和 reply。模型给出的序号无效、重复或越界时拒绝整个决策批次。
         """
         if not comment_items:
             return []
@@ -312,7 +318,7 @@ class ContentService:
             all_image_urls: list[str] = []
             url_keys: list[tuple[tuple[int, int], str]] = []
             for i, item in enumerate(comment_items, 1):
-                urls = [str(u) for u in item.get("feed_images", []) if u]
+                urls = [str(u) for u in item.get("feed_images") or [] if u]
                 for j, url in enumerate(urls, 1):
                     all_image_urls.append(url)
                     url_keys.append(((i, j), url))
@@ -328,7 +334,7 @@ class ContentService:
                 )
         else:
             all_image_urls = [
-                str(u) for item in comment_items for u in item.get("feed_images", []) if u
+                str(u) for item in comment_items for u in item.get("feed_images") or [] if u
             ]
             if all_image_urls:
                 image_descs = await describe_images(
@@ -363,16 +369,33 @@ class ContentService:
         )
 
         decisions = parse_batch_reply_decisions(response_text)
-        for d in decisions:
+        indices = [decision["comment_index"] for decision in decisions]
+        if len(indices) != len(set(indices)) or any(
+            index > len(comment_items) for index in indices
+        ):
+            logger.warning("批量评论决策包含重复或越界序号，拒绝整批决策。")
+            return []
+        bound_decisions: list[dict[str, Any]] = []
+        for decision in decisions:
+            item = comment_items[decision["comment_index"] - 1]
+            bound_decisions.append(
+                {
+                    "target_key": reply_item_key(item),
+                    "comment_tid": str(item.get("comment_tid", "")),
+                    "feed_id": str(item.get("feed_id", "")),
+                    "reply": decision["reply"],
+                }
+            )
+        for d in bound_decisions:
             logger.debug(
                 f"评论回复决策明细: comment_tid={d.get('comment_tid')} "
                 f"feed_id={d.get('feed_id')} reply={str(d.get('reply'))[:60]!r}"
             )
         logger.info(
             f"批量评论决策完成：{len(comment_items)} 条评论，"
-            f"{sum(1 for d in decisions if d.get('reply'))} 条决定回复。"
+            f"{sum(1 for d in bound_decisions if d.get('reply'))} 条决定回复。"
         )
-        return decisions
+        return bound_decisions
 
     async def generate_feed_decisions(
         self,
@@ -385,8 +408,7 @@ class ContentService:
                         created_time, image_text, comment_count 字段
 
         Returns:
-            决策列表，每项为 ``{"tid": str, "target_qq": str,
-            "like": bool, "comment": str | None}``。
+            决策列表含 feed 身份和动作；楼中楼回复附带精确 reply_comment_key。
             ``like`` 表示是否点赞；``comment`` 为 None 表示不写评论。
         """
         if not feed_items:
@@ -408,7 +430,7 @@ class ContentService:
             all_image_urls: list[str] = []
             url_keys: list[tuple[tuple[int, int], str]] = []
             for i, item in enumerate(feed_items, 1):
-                urls = [str(u) for u in item.get("images", []) if u]
+                urls = [str(u) for u in item.get("images") or [] if u]
                 for j, url in enumerate(urls, 1):
                     all_image_urls.append(url)
                     url_keys.append(((i, j), url))
@@ -446,16 +468,51 @@ class ContentService:
         )
 
         decisions = parse_feed_decisions(response_text)
-        for d in decisions:
+        feed_map: dict[tuple[str, str], list[dict[str, Any]]] = {}
+        for feed in feed_items:
+            key = (str(feed.get("tid", "")).strip(), str(feed.get("target_qq", "")).strip())
+            feed_map.setdefault(key, []).append(feed)
+        bound_decisions: list[dict[str, Any]] = []
+        seen_feeds: set[tuple[str, str]] = set()
+        for decision in decisions:
+            key = (decision["tid"], decision["target_qq"])
+            if key in seen_feeds or len(feed_map.get(key, [])) != 1:
+                logger.warning("好友说说决策重复或无法唯一归属，拒绝整批决策。")
+                return []
+            seen_feeds.add(key)
+            feed = feed_map[key][0]
+            reply_index = decision["reply_comment_index"]
+            reply_text = decision["reply_to"]
+            if decision["comment"] is not None and (reply_index is not None or reply_text is not None):
+                logger.warning("好友说说决策同时评论和回复，拒绝整批决策。")
+                return []
+            if (reply_index is None) != (reply_text is None):
+                logger.warning("好友说说回复缺少目标序号或回复文本，拒绝整批决策。")
+                return []
+            result = {
+                "tid": decision["tid"],
+                "target_qq": decision["target_qq"],
+                "like": decision["like"],
+                "comment": decision["comment"],
+                "reply_to": reply_text,
+            }
+            if reply_index is not None:
+                comments = feed.get("comments")
+                if not isinstance(comments, list) or reply_index > len(comments):
+                    logger.warning("好友说说回复序号越界，拒绝整批决策。")
+                    return []
+                result["reply_comment_key"] = comment_identity(comments[reply_index - 1])
+            bound_decisions.append(result)
+        for d in bound_decisions:
             logger.debug(
                 f"好友说说决策明细: tid={d.get('tid')} target_qq={d.get('target_qq')} "
                 f"like={d.get('like')} comment={str(d.get('comment'))[:60]!r}"
             )
         logger.info(
             f"好友说说评论决策完成：{len(feed_items)} 条说说，"
-            f"决定评论 {sum(1 for d in decisions if d.get('comment'))} 条。"
+            f"决定评论 {sum(1 for d in bound_decisions if d.get('comment'))} 条。"
         )
-        return decisions
+        return bound_decisions
 
     # ------------------------------------------------------------------
     # 发送历史

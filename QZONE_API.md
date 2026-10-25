@@ -35,7 +35,7 @@ FoxZone 通过 `src.app.plugin_system.api.adapter_api` 获取已启动的 QQ 适
 {
   "status": "ok",
   "data": {
-    "cookies": "uin=o123456789; skey=@abcdefgh; p_skey=xyz..."
+    "cookies": "<cookie_string>"
   }
 }
 ```
@@ -44,9 +44,9 @@ FoxZone 通过 `src.app.plugin_system.api.adapter_api` 获取已启动的 QQ 适
 
 | 字段 | 说明 | 示例 |
 |------|------|------|
-| `uin` | QQ 号，带 `o` 前缀 | `o123456789` |
-| `skey` | 登录凭证，带 `@` 前缀 | `@Abc12345` |
-| `p_skey` | 用于计算 gtk2，二级域名 key | `AbcDef...` |
+| `uin` | QQ 号，带 `o` 前缀 | `o<bot_uin>` |
+| `skey` | 登录凭证，具体值由适配器提供 | `<skey>` |
+| `p_skey` | 用于计算 gtk2，二级域名 key | `<p_skey>` |
 
 > **注意**：`uin` 在 Cookie 中以 `o` 开头，使用时需去掉前缀 `o` 取数字部分。
 
@@ -144,7 +144,7 @@ Connection: keep-alive
 ```json
 {
   "code": 0,
-  "logininfo": {"name": "昵称", "uin": 123456},
+  "logininfo": {"name": "昵称", "uin": "<uin>"},
   "msglist": [
     {
       "tid": "说说ID",
@@ -181,9 +181,9 @@ Connection: keep-alive
 | `filter` | 固定 `all` |
 | `flag` | 固定 `1` |
 | `applist` | 固定 `all` |
-| `pagenum` | 页码，默认 `1`（该 CGI 深分页依赖时间游标，页码仅首页可靠） |
+| `pagenum` | 首页为 `1`，续页使用服务端 `data.main` 状态中的值，不自行加一 |
 | `count` | 获取数量 |
-| `format` | 固定 `json` |
+| `format` | `jsonp`，回调为 `_preloadCallback` |
 | `useutf8` | 固定 `1` |
 | `outputhtmlfeed` | 固定 `1` |
 
@@ -214,73 +214,37 @@ Connection: keep-alive
 | `ref` | 固定 `feeds` |
 | `content` | 评论内容 |
 
-**成功响应**：响应文本通常为非标准格式，解析为 JSON 后 `code=0` 表示成功。
+**成功响应**：解析回执后，整数 `code=0` 且可选 `subcode=0` 才表示成功。无法解析的回执属于待核实结果。
 
 ---
 
-### 3.5 回复评论（二级评论）
+### 3.5 回复评论（楼中楼）
 
-> 字段语义与请求特征以浏览器 DevTools 实际抓包为准对齐。任何字段偏差都会触发 QZone 反爬伪装错误 `-10049`。
+楼中楼回复与普通一级评论使用不同端点。FoxZone 的 `reply` 使用：
 
-**端点**：`POST https://user.qzone.qq.com/proxy/domain/taotao.qzone.qq.com/cgi-bin/emotion_cgi_re_feeds`
+**端点**：`POST https://h5.qzone.qq.com/proxy/domain/taotao.qzone.qq.com/cgi-bin/emotion_cgi_addreply_ugc`
 
-**查询参数**：
-| 参数 | 值 |
-|------|-----|
-| `g_tk` | gtk2 计算值 |
+**查询参数**：`g_tk`。
 
-**表单参数**（顺序按浏览器实际请求）：
-| 参数 | 说明 |
-|------|------|
-| `topicId` | `<说说主人QQ>_<说说tid>__1` |
-| `feedsType` | 固定 `100` |
-| `inCharset` | 固定 `utf-8` |
-| `outCharset` | 固定 `utf-8` |
-| `plat` | 固定 `qzone` |
-| `source` | 固定 `ic` |
-| `hostUin` | 说说主人 QQ 号 |
-| `isSignIn` | 固定空字符串 `""`（**必传**） |
-| `platformid` | 固定 `52` |
-| `uin` | Bot QQ 号 |
-| `format` | 固定 `fs` |
-| `ref` | 固定 `feeds` |
-| `content` | **必须包含 @ 提及格式**：`@{uin:<被回复者QQ>,nick:<被回复者昵称>,auto:1} <实际内容>` |
-| `commentId` | **顶层一级评论的 tid**（不是被回复的二级评论 tid） |
-| `commentUin` | **Bot 自身 QQ 号（操作者 uin）**，不是评论作者 QQ |
-| `richval` | 固定 `""` |
-| `richtype` | 固定 `""` |
-| `private` | 固定 `"0"` |
-| `paramstr` | 固定 `"1"`（不是 `"2"`） |
-| `qzreferrer` | `https://user.qzone.qq.com/<bot_uin>`（**不带 `/main`**） |
+**表单字段**：
+| 参数 | 当前语义 |
+|------|----------|
+| `uin` | 当前机器人账号 |
+| `hostUin` | 说说主人账号 |
+| `hostuin` | 当前机器人账号 |
+| `topicId` | `<说说主人>_<说说tid>`，不附加 `__1` |
+| `commentId` | 所属父级一级评论 ID；回复楼中楼时仍定位到该父级 |
+| `commentUin` | 父级一级评论作者账号，不是机器人账号或被回复子评论作者 |
+| `content` | 回复正文；指定被回复对象时前置 `@{uin:<目标账号>,nick:<昵称>,auto:1} ` |
+| `inCharset` / `outCharset` | `utf-8` |
+| `ref` | 空字符串 |
+| `code_version` | `1` |
+| `format` | `fs` |
+| `qzreferrer` | `https://user.qzone.qq.com/<说说主人>` |
 
-**特殊请求头**（按浏览器实际请求对齐，缺失会触发反爬 -10049）：
-```http
-Accept: */*
-Accept-Language: zh-CN,zh;q=0.9,en;q=0.8
-Content-Type: application/x-www-form-urlencoded;charset=UTF-8
-Sec-Fetch-Dest: empty
-Sec-Fetch-Mode: cors
-Sec-Fetch-Site: same-origin
-Sec-CH-UA: "Chromium";v="138", "Not(A:Brand";v="99", "Google Chrome";v="138"
-Sec-CH-UA-Mobile: ?0
-Sec-CH-UA-Platform: "Windows"
-Referer: https://user.qzone.qq.com/<bot_uin>
-Origin: https://user.qzone.qq.com
-```
+昵称在构造提及内容时先将 `%`、`,`、`}` 分别转义为 `%25`、`%2C`、`%7D`，之后由表单编码执行一次传输编码。普通评论仍使用 §3.4 的 `emotion_cgi_re_feeds` 及其旧表单语义；两种写入路径独立，不在失败时切换端点重发。
 
-**响应格式**（`format=fs`）：
-QZone 返回的是 frame 桥接 HTML 而非纯 JSON，需用正则从中提取 `frameElement.callback({...})` 的 JSON 片段：
-
-```regex
-frameElement\.callback\s*\(\s*(\{[\s\S]*?\})\s*\)
-```
-
-`code=0` 表示成功；`code=-10049` 表示触发反爬（实为请求特征异常被识别，并非真限流）；`code=-3000` 表示 cookie 失效。
-
-**⚠️ 字段语义（关键）**：
-- `commentUin` 在 reply 接口里是"**操作者 uin**"（即 Bot 自身），不是被回复评论的作者 QQ。写错会被 QZone 反爬识别为请求特征异常，返回 `-10049 使用人数过多`。
-- 被回复者的 QQ 与昵称必须以 `@{uin:xxx,nick:xxx,auto:1} ` 前缀写入 `content` 字段，否则同样触发反爬。
-- `commentId` 必须是**顶层一级评论的 tid**。当用户回复的是二级评论时，需要从评论树里向上溯源到顶层评论。
+解析器接受 JSON、JSONP 或 frame callback 载荷。只有整数 `code=0`、可选 `subcode=0` 且存在有效 `data.id` 才作为带新回复 ID 的成功回执；数值 `0` 是有效 ID，不要求十六进制格式。响应缺失新 ID、无法解析或传输中断都不能据此判断未投递。
 
 ---
 
@@ -350,13 +314,13 @@ QQ 空间 API 响应为非标准 JSON，存在以下格式变体：
 
 1. **纯 JSON**：直接解析
 2. **JSONP 回调**：`_preloadCallback({...})` 或 `callback({...})`，需提取括号内内容
-3. **混合非标准 JSON**：含 `undefined` 等非法值，需替换为 `null` 再解析
+3. **对象字面量**：通过 json5 读取单引号、未引用键等；载荷中的 `undefined` token 映射为 `null`，字符串正文保持原样
 
 解析步骤：
-1. 尝试匹配 JSONP 回调正则 `callback\s*\(\s*(\{.*\})\s*\)`
-2. 若失败，提取第一个 `{` 到最后一个 `}` 之间的内容
-3. 将 `undefined` 替换为 `null`
-4. 用 json5 解析（容错）
+1. 优先解析 JSON 对象；否则定位 JSONP 或 frame callback
+2. 跟踪引号、转义及括号深度，提取单个完整对象，拒绝残缺或多余可执行载荷
+3. 仅转换字符串之外的 `undefined` token，使用 orjson / json5 读取数据，不执行远端 JavaScript
+4. 校验 `code`、`subcode` 与接口返回结构；解析失败不作为写入成功
 
 ---
 
@@ -373,9 +337,9 @@ QQ 空间 API 响应为非标准 JSON，存在以下格式变体：
 
 ## 六、已知问题与注意事项
 
-1. **回复端点域名**：回复（二级评论）与评论（一级评论）接口均使用 `user.qzone.qq.com` 子域（详见 §3.5）。
+1. **回复端点**：普通评论使用 `user.qzone.qq.com` 代理下的 `emotion_cgi_re_feeds`；楼中楼回复使用 §3.5 的 `h5.qzone.qq.com` 代理及独立 `emotion_cgi_addreply_ugc`。
 
-2. **`commentId` vs `parent_tid`**：回复接口使用 `commentId` + `commentUin` 组合定位被回复评论，不使用 `parent_tid` 参数。
+2. **回复身份**：`commentId` / `commentUin` 对应父级一级评论 ID 与作者。楼中楼目标作者另通过提及正文表达；不得将子评论 ID 或机器人账号替代父级身份。
 
 3. **Cookie 缓存策略**：Cookie 缓存于 `data/foxzone/cookies/cookies-<qq>.json`。当 API 返回 code=-3000 时，需调用 `CookieService.clear_cache()` 清除缓存并重新获取。
 
@@ -394,28 +358,41 @@ QQ 空间 API 响应为非标准 JSON，存在以下格式变体：
 
 ### 7.1 单条说说详情：`emotion_cgi_msgdetail_v6`
 
-- 端点：`GET https://h5.qzone.qq.com/proxy/domain/taotao.qq.com/cgi-bin/emotion_cgi_msgdetail_v6`
-  - 子域必须是 `taotao.qq.com`，不是 `taotao.qzone.qq.com`，写错会返回 `code=-10004`。
-- 必传参数仅 4 个：`uin`、`tid`、`format=jsonp`、`g_tk`。任何额外字段都会被反爬识别为异常请求，返回 `-10004`。
-- 响应是 JSONP，需先剥掉 `_Callback(...)` 或 `frameElement.callback(...)` 外壳再 JSON 解析。
-- 用途：按 tid 精准拉取单条说说的完整评论树（含 list_3 楼中楼），供外部回查解析被回复评论的父级归属。
+- 端点：`GET https://h5.qzone.qq.com/proxy/domain/taotao.qq.com/cgi-bin/emotion_cgi_msgdetail_v6`。FoxZone 将基础 URL 中的代理域改为 `taotao.qq.com`。
+- 请求包含 `uin`、`tid`、`t1_source=1`、`not_trunc_con=1`、`need_right=1`、`not_adapt_outpic=1` 和 `g_tk`。评论分页开启时再附加 `pos` / `num`；关闭时不带这两个字段。不要把其他端点/参数组合曾遇到的 `-10004` 归因于固定参数数量，也不能据此推断已在真实服务端修复。
+- 响应解析接受 JSON、JSONP 或 frame callback，并校验返回 `tid` 与请求匹配。详情字段含正文、图片、服务端评论统计、`commentlist` 及其中可用的 `list_3`；这不构成完整楼中楼保证。
 
-### 7.2 评论 `tid` 形态与 `reply` 的 `commentId`
+### 7.2 一级评论分页与完整性
 
-`msglist_v6` 内嵌 `list_3` 楼中楼的 `tid` 以及 `msgdetail_v6` 返回的一级/二级评论 `tid` **均为该说说内的数字局部序号**（如 `"1"`），不是 24 位 hex 全局 tid。`reply` 接口的 `commentId` 直接使用该数字 tid 即可成功——服务端按 `topicId` + `commentId` 定位评论，不要求 hex 形态。
+- `fetch_feed_detail` 默认以 `pos=0`、`num=20` 开始，最多读取 20 页；只在已读一级评论数与已知服务端统计相等时标记 `comments_complete=True`。空页本身不能证明完整；短页、重复页、页数预算耗尽或后续页读取失败都不会被当成完整。
+- 跨页按父评论 ID、评论 ID、作者组成的身份去重。`comment_total` / `comment_count` 保存服务端统计值，`comments` 是当前取得的扁平列表；服务端统计为 `0` 与未知值 `None` 均不会被替换成列表长度。
+- `comments_complete` 只表示一级评论的计数完整性；`list_3` 内联回复的完整性当前标记为 `inline_replies_complete=False`。分页预算不是全部评论或楼中楼完整性的承诺。
 
-`commentId` 取**被回复子评论的 `parent_tid` 字段**：msgdetail_v6 中该字段即所属顶层一级评论的 tid（顶层 tid 在顶层内唯一，子回复一律挂在某条顶层下），直接使用即可。全量溯源不可行，因为子回复 tid 与一级 tid 从 1 各自编号、跨层级冲突。
+### 7.3 回复索引与评论身份
 
-### 7.3 限流处理（`-10049`）
+- 批量回复的 `comment_index`、好友动态决策的 `reply_comment_index` 均为本次输入列表的 1 基序号。生成器将序号映射为本次输入的完整身份键；好友动态写入前会重新读取详情，要求所选身份唯一，并核实作者与父评论身份。
+- 评论 ID 是不透明值：`0` 有效，不要求 hex。一级评论与 `list_3` 子回复可能跨层重复 ID，因此单独按 ID 或昵称匹配不够；二级回复需解析到父级一级评论身份。
+- `qzone_post_comment` 接受精确目标 `comment_id` / `comment_uin`；二级回复另需 `parent_comment_id` / `parent_comment_uin`。不完整或无法唯一核实的身份不会退化成普通评论。
 
-- 外部接力路径：`reply` 触发 `-10049` 时**单条**跳过（标记该评论已处理，避免下轮重复触发），循环继续处理本批后续条目。
-- 好友监控评论路径：触发限流即**终止整批**，剩余项保持未标记以便下轮再试。
-- 两种策略由 `autopilot/engine.py` 的 `BatchPolicy.stop_batch_on_rate_limit` 参数区分。
+### 7.4 好友动态解析与分页
 
-### 7.4 串行化发送（runtime 实例锁）
+- `feeds3_html_more` 的正文优先取非空 `qz_info_complete`，避免 `qz_info_cut` 摘要或评论区域污染正文。`content_complete` 为 `true` / `false` / `None` 分别表示已识别完整正文、折叠正文或未知；未知时保留当前正文，不保证长文完整。
+- `None`、空列表和数值 `0` 保持不同含义：缺失列表/统计不等于空列表/零。评论统计来自服务端字段，不由当前可见评论数量反推。
+- 每轮监控从首页初始状态开始，原样接续服务端 `main` 状态，省略字段沿用上一页值；`aisortNextTime` 映射为请求字段 `getAisort`。没有有效结束标志、下一页状态缺失、字段异常、完整游标停滞或超过本轮预算时停止并报告异常。单独变化的服务器时钟不算推进，不跨轮保存长游标，也不手工要求服务端页码递增一。
+- 接续状态包括 `begintime`、`dayspac`、`pagenum`、`aisortEndTime`、`aisortOffset`、`aisortBeginTime`、`aisortNextTime`、`icServerTime`、`externparam`、`daylist`、`uinlist`，保留其中服务端不透明参数，不自行拆解或拼接。
+- 图片优先级为当前解析路径提供的原图/大图字段（包括 `data-originurl`、`url3`、`url2`、`url1`、`smallurl`），过滤非法及非 HTTP(S) URL 并按 URL 去重。结果仅覆盖响应中可见的图片，不保证完整相册或 9 张以上图片。
 
-发送循环通过 `QZoneRuntime.reply_send_lock`（`asyncio.Lock`）串行化。runtime 是插件级单例，实例级锁即可在插件内全局生效。LLM 决策不持锁，仍可并发。
+### 7.5 未知写入结果与状态
 
-### 7.5 `InteractionLog` 一致性
+- 普通评论保留 `emotion_cgi_re_feeds` 旧语义；楼中楼回复使用独立端点。未知回执、无效回执、缺少新回复 ID 或写后断线不返回成功，也不转换成普通 `False` 让调用方重试。
+- 未知结果写入既有 `reply_tracker` 的 `pending` 状态，自动流程据此阻止重发；状态按机器人账号、说说主人、父评论 ID/作者及目标作者隔离。旧 `data` 记录继续作为 `legacy` 防重复标记，不伪造其归属。
+- 需先人工只读核实 QQ 空间中的投递结果，不能凭连接异常或缺失回执判断未发送。此文档及离线测试不证明真实服务端已接收、展示或升级部署。
 
-持久化状态（`interaction_log.json` 等）由插件级单例 `QZoneRuntime` 统一持有。
+### 7.6 限流与串行化
+
+- `-10049` 按明确拒绝限流处理，不在该写请求上切换普通评论/回复端点。外部接力场景跳过当前项并继续本批；好友动态评论场景终止本批，未处理项留待后续轮次。
+- 普通异常重试策略由 `BatchSendEngine` 控制；未知结果使用独立 pending 路径，不进入通用重试。发送经插件级 runtime 的 `reply_send_lock` 串行化，LLM 决策不持有该锁。
+
+### 7.7 `InteractionLog` 一致性
+
+持久化状态（互动日志、回复跟踪等）由插件级单例 `QZoneRuntime` 持有。

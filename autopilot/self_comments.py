@@ -13,6 +13,7 @@ from typing import Any
 
 from src.app.plugin_system.api.log_api import COLOR, get_logger
 
+from ..core.comment_tree import comment_identity, reply_item_key, reply_target
 from .external import process_reply_batch
 
 if typing.TYPE_CHECKING:
@@ -48,6 +49,7 @@ async def poll_self_comments_once(
         return
 
     logger.debug(f"评论轮询：获取到 {len(feeds)} 条自己的说说")
+    account_qq = str(await runtime.bot_qq())
     new_items: list[dict[str, Any]] = []
     for feed in feeds:
         feed_id: str = str(feed.get("tid", ""))
@@ -67,8 +69,9 @@ async def poll_self_comments_once(
             if commenter_qq == bot_qq:
                 continue
 
-            comment_tid: str = str(comment.get("comment_tid", ""))
-            if not comment_tid:
+            comment_tid = str(comment.get("comment_tid", "") if comment.get("comment_tid") is not None else "")
+            target = reply_target(comment, comments)
+            if not comment_tid or target is None:
                 continue
 
             # 过滤过期评论（max_age_hours > 0 时生效）
@@ -87,21 +90,38 @@ async def poll_self_comments_once(
                     except ValueError:
                         pass  # 格式无法解析时不过滤
 
-            if runtime.reply_tracker.has_replied(feed_id, comment_tid):
+            parent_comment_id, parent_comment_uin = target
+            parent_tid = (
+                str(comment.get("parent_tid", ""))
+                if comment.get("parent_tid") is not None
+                else ""
+            )
+            if not parent_tid and comment.get("parent_comment_id") is not None:
+                parent_tid = str(comment["parent_comment_id"])
+            if runtime.reply_tracker.is_blocked(
+                feed_id,
+                comment_tid,
+                account_qq=account_qq,
+                host_qq=bot_qq,
+                parent_comment_id=parent_comment_id,
+                parent_comment_uin=parent_comment_uin,
+                comment_uin=commenter_qq,
+            ):
                 logger.debug(
-                    f"评论轮询：comment {comment_tid} 已被回复过（reply_tracker 命中），跳过"
+                    f"评论轮询：comment {comment_tid} 已处理或结果待核实，跳过"
                 )
                 continue
 
             # 解析父评论上下文（用于支持楼中楼对话链）
-            parent_tid_raw = comment.get("parent_tid")
-            parent_tid: str = str(parent_tid_raw).strip() if parent_tid_raw else ""
             parent_content: str = ""
             parent_commenter_qq: str = ""
             parent_commenter_name: str = ""
             if parent_tid:
                 for _c in comments:
-                    if str(_c.get("comment_tid", "")) == parent_tid:
+                    if (
+                        _c.get("parent_tid") in (None, "")
+                        and str(_c.get("comment_tid", "") if _c.get("comment_tid") is not None else "") == parent_tid
+                    ):
                         parent_content = str(_c.get("content", "") or "")
                         parent_commenter_qq = str(_c.get("qq_account", "") or "")
                         parent_commenter_name = str(_c.get("nickname", "") or "")
@@ -113,24 +133,33 @@ async def poll_self_comments_once(
                 f"内容={str(comment.get('content', ''))[:60]!r} "
                 f"parent_tid={parent_tid!r} is_reply_to_bot={is_reply_to_bot}"
             )
-            new_items.append({
+            item = {
                 "feed_id": feed_id,
                 "feed_content": feed_content,
+                "content_complete": feed.get("content_complete"),
+                "comment_count": feed.get("comment_count"),
+                "comments_complete": feed.get("comments_complete", False),
+                "inline_replies_complete": feed.get("inline_replies_complete", False),
                 "feed_images": feed.get("images", []),
                 "story_time": feed.get("created_time", ""),
                 "all_comments": comments,
                 "comment_tid": comment_tid,
+                "comment_identity": comment_identity(comment),
                 "comment_content": comment.get("content", ""),
                 "comment_time": comment.get("create_time", ""),
                 "commenter_name": comment.get("nickname", ""),
                 "commenter_qq": commenter_qq,
                 "parent_tid": parent_tid,
+                "parent_comment_id": parent_comment_id,
+                "parent_comment_uin": parent_comment_uin,
                 "parent_content": parent_content,
                 "parent_commenter_qq": parent_commenter_qq,
                 "parent_commenter_name": parent_commenter_name,
                 "is_reply_to_bot": is_reply_to_bot,
                 "host_qq": bot_qq,
-            })
+            }
+            item["target_key"] = reply_item_key(item)
+            new_items.append(item)
 
     if not new_items:
         logger.debug("本次轮询无新评论需要处理。")

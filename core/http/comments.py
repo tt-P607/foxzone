@@ -1,28 +1,22 @@
-"""QZone 评论 / 楼中楼回复接口族（emotion_cgi_re_feeds）。
-
-reply 接口的字段语义经过浏览器抓包实证校准（详见 QZONE_API.md §3.5），
-**不要凭直觉修改任何字段**：
-
-- ``commentUin`` 是操作者 uin（bot 自己），不是评论作者 QQ
-- 被回复者身份通过 ``content`` 内的 ``@{uin:...,nick:...,auto:1}`` 前缀传递
-- ``commentId`` 必须是顶层一级评论的 hex tid
-- 任何字段偏差都会触发 -10049 反爬伪装错误
-"""
+"""QZone 普通评论与楼中楼回复接口。"""
 
 from __future__ import annotations
 
 from typing import Any
 
-import orjson
-
 from .client import COMMENT_URL, QZoneClientBase, logger
+from .response import (
+    QZoneInvalidResponseError,
+    QZoneRateLimitError,
+    check_response,
+    parse_response,
+)
+
+__all__ = ["CommentsMixin", "QZoneRateLimitError", "QZoneUnknownResultError"]
 
 
-class QZoneRateLimitError(RuntimeError):
-    """QZone 反爬限流错误（code=-10049）。
-
-    该错误重试亦无效，由批量发送引擎识别并终止重试。
-    """
+class QZoneUnknownResultError(RuntimeError):
+    """写请求结果无法确认，禁止调用方盲目重试。"""
 
 
 class CommentsMixin(QZoneClientBase):
@@ -58,32 +52,27 @@ class CommentsMixin(QZoneClientBase):
         }
         logger.debug(
             f"comment 调用: target_qq={target_qq} feed_id={feed_id} "
-            f"text_len={len(text)} text={text[:80]!r}"
+            f"text_len={len(text)}"
         )
         try:
             resp_text = await self._request(
                 "POST", COMMENT_URL, params={"g_tk": self._gtk}, data=data
             )
-            try:
-                resp_data = orjson.loads(resp_text)
-                code = resp_data.get("code", -1)
-                logger.debug(f"comment 响应: code={code} message={resp_data.get('message')}")
-                if code == 0:
-                    return True
-                if code == -3000:
-                    raise RuntimeError(
-                        f"评论失败: {resp_data.get('message')} (错误码: -3000)"
-                    )
-                logger.error(f"评论 API 返回失败: code={code}, message={resp_data.get('message')}")
-                return False
-            except orjson.JSONDecodeError:
-                # 响应无法解析为 JSON，假定成功
-                return True
-        except RuntimeError:
-            raise
         except Exception as e:
-            logger.error(f"评论说说异常: {e}")
-            return False
+            raise QZoneUnknownResultError("评论请求结果不确定，需先核实投递状态") from e
+        try:
+            resp_data = parse_response(resp_text)
+        except (ValueError, TypeError) as error:
+            raise QZoneUnknownResultError("评论结果无法解析，需先核实投递状态") from error
+        logger.debug(
+            f"comment response: code={resp_data.get('code')} "
+            f"subcode={resp_data.get('subcode', 0)}"
+        )
+        try:
+            check_response(resp_data, "评论")
+        except QZoneInvalidResponseError as error:
+            raise QZoneUnknownResultError("评论回执字段无效，需先核实投递状态") from error
+        return True
 
     async def reply(
         self,
@@ -91,153 +80,108 @@ class CommentsMixin(QZoneClientBase):
         host_qq: str,
         target_name: str,
         content: str,
-        comment_tid: str,
+        comment_tid: str | int,
         commenter_qq: str = "",
-    ) -> bool:
-        """回复指定评论（二级评论）。
+        *,
+        parent_comment_uin: str | int,
+        images: list[bytes] | None = None,
+    ) -> dict[str, str | int]:
+        """回复指定的一级评论或楼中楼评论。
 
         Args:
             feed_id: 说说 tid
             host_qq: 说说主人 QQ 号
-            target_name: 被回复的评论者昵称
+            target_name: 被提及者昵称
             content: 回复内容
-            comment_tid: 顶层一级评论的 tid（作为 commentId）
-            commenter_qq: 被回复的评论者 QQ 号（用于 @ 提及前缀）
+            comment_tid: 父级一级评论 ID
+            commenter_qq: 实际被提及者 QQ 号
+            parent_comment_uin: 父级一级评论作者 QQ 号
+            images: 回复图片；不支持非空图片列表
 
         Returns:
-            True 表示回复成功
+            含新回复 ID 与父评论 ID/作者的回执
 
         Raises:
-            RuntimeError: Cookie 失效（code=-3000）或 QZone 限流（code=-10049）
+            RuntimeError: 明确服务端拒绝或结果无法确认
+            ValueError: 图片不受支持
         """
-        # content 必须包含 @ 提及格式（浏览器对二级评论强制如此），
-        # 否则 QZone 反爬会以 -10049 拒绝。
+        if images:
+            raise ValueError("楼中楼回复不支持图片")
+        if isinstance(comment_tid, bool) or not isinstance(comment_tid, (str, int)):
+            raise ValueError("父评论 ID 必须为字符串或整数")
+        comment_tid = str(comment_tid)
+        for field, value in (
+            ("机器人 QQ 号", self._uin),
+            ("说说主人 QQ 号", host_qq),
+            ("父评论作者 QQ 号", str(parent_comment_uin)),
+        ):
+            if not value.isdecimal() or int(value) <= 0:
+                raise ValueError(f"{field}必须为正整数")
+        if not feed_id.strip() or not content.strip() or not comment_tid.strip():
+            raise ValueError("说说 ID、父评论 ID 和回复内容不能为空")
+        if commenter_qq and (not commenter_qq.isdecimal() or int(commenter_qq) <= 0):
+            raise ValueError("被提及者 QQ 号必须为正整数")
+        if bool(commenter_qq) != bool(target_name.strip()):
+            raise ValueError("被提及者 QQ 号和昵称必须成对提供")
+
         mentioned_content = (
-            f"@{{uin:{commenter_qq},nick:{target_name},auto:1}} {content}"
+            "@{uin:"
+            + commenter_qq
+            + ",nick:"
+            + target_name.strip().replace("%", "%25").replace(",", "%2C").replace("}", "%7D")
+            + f",auto:1}} {content}"
             if commenter_qq
             else content
         )
+        endpoint = (
+            "https://h5.qzone.qq.com/proxy/domain/taotao.qzone.qq.com/"
+            "cgi-bin/emotion_cgi_addreply_ugc"
+        )
         data: dict[str, Any] = {
-            "topicId": f"{host_qq}_{feed_id}__1",
-            "feedsType": 100,
+            "uin": self._uin,
+            "hostUin": host_qq,
+            "hostuin": self._uin,
+            "topicId": f"{host_qq}_{feed_id}",
+            "commentId": comment_tid,
+            "commentUin": str(parent_comment_uin),
+            "content": mentioned_content,
             "inCharset": "utf-8",
             "outCharset": "utf-8",
-            "plat": "qzone",
-            "source": "ic",
-            "hostUin": host_qq,
-            "isSignIn": "",
-            "platformid": 52,
-            "uin": self._uin,
+            "ref": "",
+            "code_version": "1",
             "format": "fs",
-            "ref": "feeds",
-            "content": mentioned_content,
-            "commentId": comment_tid,
-            # commentUin 是"操作者 uin"（即 bot 自己），不是评论作者 QQ
-            "commentUin": self._uin,
-            "richval": "",
-            "richtype": "",
-            "private": "0",
-            "paramstr": "1",
-            "qzreferrer": f"https://user.qzone.qq.com/{self._uin}",
-        }
-        reply_headers: dict[str, str] = {
-            "Accept": "*/*",
-            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
-            "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8",
-            "Sec-Fetch-Dest": "empty",
-            "Sec-Fetch-Mode": "cors",
-            "Sec-Fetch-Site": "same-origin",
-            "Sec-CH-UA": '"Chromium";v="138", "Not(A:Brand";v="99", "Google Chrome";v="138"',
-            "Sec-CH-UA-Mobile": "?0",
-            "Sec-CH-UA-Platform": '"Windows"',
-            "Referer": f"https://user.qzone.qq.com/{self._uin}",
-            "Origin": "https://user.qzone.qq.com",
+            "qzreferrer": f"https://user.qzone.qq.com/{host_qq}",
         }
         try:
             resp_text = await self._request(
-                "POST", COMMENT_URL, params={"g_tk": self._gtk}, data=data, headers=reply_headers
+                "POST", endpoint, params={"g_tk": self._gtk}, data=data
             )
-            # 调试日志：输出请求关键字段和响应原文，便于诊断 reply 是否真发出
-            logger.debug(
-                f"reply 调用: feed_id={feed_id}, host_qq={host_qq}, "
-                f"commentId={comment_tid}, 被回复者={commenter_qq}, "
-                f"target_name={target_name!r}, content_len={len(content)}"
-            )
-            logger.debug(f"reply 响应原文: {resp_text[:500]}")
-            try:
-                resp_data = orjson.loads(resp_text)
-                code = resp_data.get("code", -1)
-                if code == 0:
-                    logger.debug(
-                        f"reply 接口返回 code=0: "
-                        f"new_tid={resp_data.get('tid') or resp_data.get('commentid')}, "
-                        f"raw_keys={list(resp_data.keys())}"
-                    )
-                    return True
-                if code == -3000:
-                    raise RuntimeError(
-                        f"回复失败: {resp_data.get('message')} (错误码: -3000)"
-                    )
-                logger.error(
-                    f"回复 API 返回失败: code={code}, "
-                    f"message={resp_data.get('message')}, fid={feed_id}, "
-                    f"raw={resp_text[:300]}"
-                )
-                return False
-            except orjson.JSONDecodeError:
-                # format=fs 模式下 QZone 返回的是 frame 桥接 HTML，里面嵌入
-                # frameElement.callback({...}) 调用。需要从中提取 JSON 片段判断真实 code。
-                import re as _re
-
-                m = _re.search(
-                    r"frameElement\.callback\s*\(\s*(\{[\s\S]*?\})\s*\)",
-                    resp_text,
-                )
-                parsed_code: int | None = None
-                parsed_msg: str = ""
-                parsed_subcode: int | None = None
-                if m:
-                    candidate = m.group(1).replace("undefined", "null")
-                    try:
-                        parsed = orjson.loads(candidate)
-                        if isinstance(parsed, dict):
-                            parsed_code = parsed.get("code", parsed.get("ret"))
-                            parsed_msg = str(
-                                parsed.get("message") or parsed.get("msg") or ""
-                            )
-                            parsed_subcode = parsed.get("subcode")
-                    except orjson.JSONDecodeError as je:
-                        logger.debug(f"frame callback JSON 解析仍失败: {je}; 片段={candidate[:200]}")
-
-                logger.warning(
-                    f"reply 响应为 frame 桥接 HTML，提取结果: "
-                    f"code={parsed_code}, subcode={parsed_subcode}, msg={parsed_msg!r}"
-                )
-                logger.debug(f"reply 完整响应原文: {resp_text}")
-
-                if parsed_code == 0:
-                    return True
-                if parsed_code == -3000:
-                    raise RuntimeError(
-                        f"回复失败: {parsed_msg} (错误码: -3000)"
-                    )
-                if parsed_code == -10049:
-                    # QZone 限流：重试亦无效，抛专用异常让批量引擎判定为不可重试错误
-                    raise QZoneRateLimitError(
-                        f"QZone 限流（code=-10049, subcode={parsed_subcode}）：{parsed_msg}"
-                    )
-                if parsed_code is not None:
-                    logger.error(
-                        f"回复接口返回错误: code={parsed_code}, "
-                        f"subcode={parsed_subcode}, msg={parsed_msg!r}"
-                    )
-                    return False
-                logger.error(
-                    f"reply 响应无法解析任何 code/msg 字段，视为失败。原文片段: {resp_text[:300]}"
-                )
-                return False
-        except RuntimeError:
-            raise
         except Exception as e:
-            logger.error(f"回复评论异常: {e}")
-            return False
+            raise QZoneUnknownResultError("回复请求结果不确定，需先核实投递状态") from e
+        try:
+            resp_data = parse_response(resp_text)
+        except (ValueError, TypeError) as error:
+            raise QZoneUnknownResultError("回复结果无法解析，需先核实投递状态") from error
+        logger.debug(
+            f"reply response: code={resp_data.get('code')} "
+            f"subcode={resp_data.get('subcode', 0)}"
+        )
+        try:
+            check_response(resp_data, "回复")
+        except QZoneInvalidResponseError as error:
+            raise QZoneUnknownResultError("回复回执字段无效，需先核实投递状态") from error
+        reply_data = resp_data.get("data")
+        reply_id = reply_data.get("id") if isinstance(reply_data, dict) else None
+        if isinstance(reply_id, bool) or not (
+            isinstance(reply_id, int) and reply_id >= 0
+            or isinstance(reply_id, str) and bool(reply_id.strip())
+        ):
+            raise QZoneUnknownResultError(
+                "回复已接受但缺少有效新回复 ID，需先核实投递状态"
+            )
+        result_id = str(reply_id)
+        return {
+            "comment_id": result_id,
+            "parent_comment_id": comment_tid,
+            "parent_comment_uin": int(parent_comment_uin),
+        }

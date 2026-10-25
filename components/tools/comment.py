@@ -12,7 +12,7 @@ from src.app.plugin_system.api.log_api import COLOR, get_logger
 from src.app.plugin_system.api.service_api import get_service
 from src.app.plugin_system.base import BaseTool
 
-from ...core.interaction_log import ACTION_COMMENT, SOURCE_AGENT
+from ...core.http.comments import QZoneUnknownResultError
 from .. import SERVICE_SIG
 
 logger = get_logger("foxzone.tool.comment", color=COLOR.CYAN)
@@ -52,6 +52,22 @@ class QZoneCommentTool(BaseTool):
             "评论正文：必须 ≤ 30 字、自然口语化、禁 emoji、勿在开头 @ 任何人。"
             "详见 tool_description 末尾的 QZone 评论统一规范。",
         ],
+        comment_id: Annotated[
+            str | int | None,
+            "可选：要回复的评论 ID；与 comment_uin 成对提供，不填表示普通说说评论。",
+        ] = None,
+        comment_uin: Annotated[
+            str | None,
+            "可选：目标评论作者 QQ；与 comment_id 成对提供。",
+        ] = None,
+        parent_comment_id: Annotated[
+            str | int | None,
+            "二级回复必填：所属一级评论 ID；与 parent_comment_uin 成对提供。",
+        ] = None,
+        parent_comment_uin: Annotated[
+            str | None,
+            "二级回复必填：所属一级评论作者 QQ。",
+        ] = None,
     ) -> tuple[bool, str]:
         """发表评论。
 
@@ -59,6 +75,10 @@ class QZoneCommentTool(BaseTool):
             target_qq: 说说主人的 QQ 号
             feed_id: 说说 tid
             comment_text: 评论正文
+            comment_id: 可选的精确目标评论 ID
+            comment_uin: 可选的目标评论作者 QQ
+            parent_comment_id: 二级回复的一级评论 ID
+            parent_comment_uin: 二级回复的一级评论作者 QQ
 
         Returns:
             (是否成功, 结果摘要)
@@ -80,8 +100,43 @@ class QZoneCommentTool(BaseTool):
         if not fid:
             return False, "feed_id 不能为空"
 
-        ok = await service.comment(target_qq=tq, feed_id=fid, text=text)
-        if ok:
-            await service.mark_interaction(tq, fid, ACTION_COMMENT, SOURCE_AGENT)
-            return True, f"已成功评论（tid={fid}）：{text}"
-        return False, f"评论失败（tid={fid}）"
+        target_id = ("" if comment_id is None else str(comment_id)).strip()
+        target_uin = (comment_uin or "").strip()
+        parent_id = ("" if parent_comment_id is None else str(parent_comment_id)).strip()
+        parent_uin = (parent_comment_uin or "").strip()
+        if (
+            comment_id is not None or comment_uin is not None
+            or parent_comment_id is not None or parent_comment_uin is not None
+        ) and not (target_id and target_uin):
+            return False, "精确回复身份不能为空，未发送评论。"
+        if bool(target_id) != bool(target_uin):
+            return False, "精确回复必须同时提供 comment_id 和 comment_uin，未发送评论。"
+        if bool(parent_id) != bool(parent_uin):
+            return False, "父评论 ID 和作者必须成对提供，未发送评论。"
+        if parent_id and not target_id:
+            return False, "父评论字段只能用于精确二级回复，未发送评论。"
+
+        try:
+            if target_id:
+                ok = await service.reply_comment(
+                    feed_id=fid,
+                    host_qq=tq,
+                    reply_text=text,
+                    comment_tid=target_id,
+                    comment_uin=target_uin,
+                    parent_comment_id=parent_id,
+                    parent_comment_uin=parent_uin,
+                )
+                if ok:
+                    return True, f"已成功回复评论（tid={fid}, comment_id={target_id}）。"
+                return False, (
+                    f"回复未发送：目标评论无法唯一核实，或二级回复缺少父评论身份"
+                    f"（tid={fid}）。"
+                )
+
+            ok = await service.comment(target_qq=tq, feed_id=fid, text=text)
+            if ok:
+                return True, f"已成功评论（tid={fid}）：{text}"
+            return False, f"评论失败（tid={fid}）"
+        except QZoneUnknownResultError as exc:
+            return False, f"评论结果待核实，已阻止自动重发：{exc}"

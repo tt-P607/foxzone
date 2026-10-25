@@ -185,7 +185,7 @@ async def fill_image_text(
     """
     all_image_urls: list[str] = []
     for item in feed_items:
-        all_image_urls.extend(str(u) for u in item.get("images", []) if u)
+        all_image_urls.extend(str(u) for u in item.get("images") or [] if u)
     if not all_image_urls:
         return
 
